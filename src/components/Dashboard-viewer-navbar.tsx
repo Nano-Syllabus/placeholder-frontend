@@ -36,7 +36,7 @@ interface NavBarProps {
 export function NavBar({
   centerContent,
   showSearch = true,
-  searchPlaceholder = "Search...",
+  
   hasNotifications = false,
   notifOpen,
   onNotifOpenChange,
@@ -64,16 +64,7 @@ export function NavBar({
       </div>
 
       <div className="flex items-center gap-3 shrink-0">
-        {showSearch && (
-          <div className="relative hidden md:block w-56">
-            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input
-              type="search"
-              placeholder={searchPlaceholder}
-              className="w-full pl-9 bg-muted/50"
-            />
-          </div>
-        )}
+        
 
         <Popover open={notifOpen} onOpenChange={onNotifOpenChange}>
           <PopoverTrigger asChild>

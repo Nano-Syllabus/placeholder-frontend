@@ -11,12 +11,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Download, Maximize, Minimize, ZoomIn, ZoomOut,
   ChevronLeft, ChevronRight, MessageSquare, Send, CheckCircle2, Circle,
-  FileText, X, MapPin, Loader2, Layers, AlertTriangle
+  FileText, X, MapPin, Loader2, Layers, AlertTriangle, Eye, EyeOff
 } from "lucide-react";
-import { INITIAL_DISCUSSIONS, type Discussion, type Reply, type PinPosition } from "@/lib/mock-data";
+import type { Discussion, Reply, PinPosition } from "@/lib/mock-data";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { motion, AnimatePresence } from "framer-motion";
 import { NavBar } from "@/components/Dashboard-viewer-navbar";
@@ -29,13 +30,6 @@ const BASE_PAGE_WIDTH = 760;
 
 // ---------------------------------------------------------------------------
 // Resource types
-//
-// `ResourceRecord` is the raw shape returned by GET /api/courses/resources/all
-// (mirrors the `resources` Mongoose schema, with `course`/`uploadedBy`
-// populated). `ResourceView` is what this component actually renders —
-// same field names the JSX below already expected from mock data
-// (title, course, uploadDate, pages, file), so the rest of the component
-// didn't need to change shape.
 // ---------------------------------------------------------------------------
 
 interface ResourceRecord {
@@ -58,13 +52,7 @@ interface ResourceView {
   file: string;
 }
 
-/** fileUrl as stored is a server-relative path (e.g. "/uploads/xyz.pdf"). Proxy
- *  "/uploads" to the API server in vite.config.ts the same way "/api" is proxied,
- *  or this will need to be an absolute URL to your API's origin instead. */
 function toResourceView(record: ResourceRecord): ResourceView {
-  // `course` may come back populated ({ _id, title }), as a raw ObjectId
-  // string (if populate() wasn't applied), or null/undefined — handle all three
-  // rather than assuming populate always ran.
   let courseTitle = "Untitled course";
   if (typeof record.course === "string") {
     courseTitle = record.course;
@@ -90,11 +78,6 @@ function toResourceView(record: ResourceRecord): ResourceView {
   };
 }
 
-/**
- * The backend response has been observed varying in shape (top-level array,
- * `{ data: [...] }`, or `{ data: { resources: [...] } }`). Normalize all of
- * them here instead of assuming one shape and crashing when it's different.
- */
 function extractResourceArray(payload: unknown): ResourceRecord[] {
   if (Array.isArray(payload)) return payload as ResourceRecord[];
 
@@ -111,6 +94,98 @@ function extractResourceArray(payload: unknown): ResourceRecord[] {
   throw new Error("Unrecognized response shape for resources");
 }
 
+// ---------------------------------------------------------------------------
+// Discussion types
+//
+// Mirrors what the Discussion mongoose model + controllers actually return.
+// `user`/`replies[].user` come back populated with { _id, user_name, profile_pic }
+// on GET/POST-thread/POST-reply, but the PATCH endpoints (status, edit) return
+// the raw unpopulated document — see the merge logic in markResolved below.
+// ---------------------------------------------------------------------------
+
+interface DiscussionUserRecord {
+  _id: string;
+  user_name: string;
+  profile_pic?: string;
+}
+
+interface ReplyRecord {
+  _id?: string;
+  user: DiscussionUserRecord | string;
+  message: string;
+  createdAt?: string;
+}
+
+interface DiscussionRecord {
+  _id: string;
+  resource: string;
+  user: DiscussionUserRecord | string;
+  question: string;
+  page: number;
+  position?: PinPosition;
+  status: "Open" | "Resolved";
+  replies: ReplyRecord[];
+  createdAt?: string;
+}
+
+function getInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+function toDiscussionUser(user: DiscussionUserRecord | string | undefined): { name: string; avatar: string } {
+  if (user && typeof user === "object" && "user_name" in user) {
+    return { name: user.user_name, avatar: getInitials(user.user_name) };
+  }
+  return { name: "Unknown user", avatar: "?" };
+}
+
+function formatRelativeTime(dateString?: string): string {
+  if (!dateString) return "";
+  const date = new Date(dateString);
+  const diffMs = Date.now() - date.getTime();
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return "Just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function toReplyView(record: ReplyRecord): Reply {
+  return {
+    user: toDiscussionUser(record.user),
+    message: record.message,
+    time: formatRelativeTime(record.createdAt),
+  };
+}
+
+function toDiscussionView(record: DiscussionRecord, courseTitle: string): Discussion {
+  return {
+    id: record._id,
+    resourceId: record.resource,
+    user: toDiscussionUser(record.user),
+    course: courseTitle,
+    question: record.question,
+    page: record.page,
+    time: formatRelativeTime(record.createdAt),
+    status: record.status,
+    replies: (record.replies ?? []).map(toReplyView),
+    position: record.position,
+  };
+}
+
+function extractDiscussionArray(payload: unknown): DiscussionRecord[] {
+  if (payload && typeof payload === "object" && Array.isArray((payload as Record<string, unknown>).data)) {
+    return (payload as Record<string, unknown>).data as DiscussionRecord[];
+  }
+  return [];
+}
+
 export default function Viewer() {
   const [resources, setResources] = useState<ResourceView[]>([]);
   const [resourcesLoading, setResourcesLoading] = useState<boolean>(true);
@@ -119,7 +194,11 @@ export default function Viewer() {
   const [activeDocument, setActiveDocument] = useState<string>("");
   const [expandedThread, setExpandedThread] = useState<string | null>(null);
   const [replyTexts, setReplyTexts] = useState<Record<string, string>>({});
-  const [discussions, setDiscussions] = useState<Discussion[]>(INITIAL_DISCUSSIONS);
+
+  const [discussions, setDiscussions] = useState<Discussion[]>([]);
+  const [discussionsLoading, setDiscussionsLoading] = useState(false);
+  const [discussionsError, setDiscussionsError] = useState<string | null>(null);
+
   const [currentPage, setCurrentPage] = useState(1);
   const [numPages, setNumPages] = useState<number | null>(null);
   const [zoomIndex, setZoomIndex] = useState(2);
@@ -128,11 +207,15 @@ export default function Viewer() {
   const [notifOpen, setNotifOpen] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(true);
   const [pageFilter, setPageFilter] = useState<"all" | "current">("all");
+  const [showPins, setShowPins] = useState(true);
 
   const [placingPin, setPlacingPin] = useState(false);
   const [pendingPosition, setPendingPosition] = useState<PinPosition | null>(null);
   const [newQuestion, setNewQuestion] = useState("");
   const [discussionDialogOpen, setDiscussionDialogOpen] = useState(false);
+  const [submittingDiscussion, setSubmittingDiscussion] = useState(false);
+  const [discussionSubmitError, setDiscussionSubmitError] = useState<string | null>(null);
+  const [replySubmittingId, setReplySubmittingId] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const docAreaRef = useRef<HTMLDivElement>(null);
@@ -149,7 +232,6 @@ export default function Viewer() {
         const res = await authFetch("/courses/resources/all", { method: "GET" });
 
         if (!res.ok) {
-          // Try to surface the server's own error message; fall back to the status.
           const body = await res.json().catch(() => null);
           throw new Error(body?.message ?? `Request failed with status ${res.status}`);
         }
@@ -163,8 +245,6 @@ export default function Viewer() {
         if (mapped.length > 0) setActiveDocument(mapped[0].id);
       } catch (err) {
         if (cancelled) return;
-        // Log the real error — a generic banner alone won't tell you whether
-        // this was an auth failure, a network error, or a bad response shape.
         console.error("Failed to load resources:", err);
         setResourcesError(err instanceof Error ? err.message : "Failed to load resources");
       } finally {
@@ -179,12 +259,60 @@ export default function Viewer() {
     };
   }, []);
 
+  // GET /api/discussions?resource=<activeDocument> — refetch whenever the
+  // open resource changes.
+  useEffect(() => {
+    if (!activeDocument) {
+      setDiscussions([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    const getDiscussionsForResource = async () => {
+      setDiscussionsLoading(true);
+      setDiscussionsError(null);
+
+      try {
+        const res = await authFetch(`/discussions?resource=${activeDocument}`, { method: "GET" });
+
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.message ?? `Request failed with status ${res.status}`);
+        }
+
+        const payload = await res.json();
+        const records = extractDiscussionArray(payload);
+        const courseTitle = resources.find(r => r.id === activeDocument)?.course ?? "";
+        const mapped = records.map(r => toDiscussionView(r, courseTitle));
+
+        if (cancelled) return;
+        setDiscussions(mapped);
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Failed to load discussions:", err);
+        setDiscussionsError(err instanceof Error ? err.message : "Failed to load discussions");
+        setDiscussions([]);
+      } finally {
+        if (!cancelled) setDiscussionsLoading(false);
+      }
+    };
+
+    getDiscussionsForResource();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDocument]);
+
   const selectedFile = resources.find(r => r.id === activeDocument);
   const totalPages = numPages ?? selectedFile?.pages ?? 1;
   const zoomLevel = ZOOM_LEVELS[zoomIndex];
   const pageWidth = (zoomLevel / 100) * BASE_PAGE_WIDTH;
 
-  const resourceDiscussions = discussions.filter(d => d.resourceId === activeDocument);
+  // discussions is already scoped to activeDocument by the API query param
+  const resourceDiscussions = discussions;
 
   const sidebarDiscussions =
     pageFilter === "current"
@@ -193,8 +321,13 @@ export default function Viewer() {
 
   const currentPagePins = resourceDiscussions.filter(d => d.page === currentPage && d.position);
 
+  // resourceDiscussions is newest-first (server sorts by createdAt: -1, and
+  // new local discussions are prepended) — reverse it so pin #1 is always the
+  // first discussion ever pinned, and numbers only climb as more are added,
+  // instead of shuffling around on every new post.
   const allResourcePins = resourceDiscussions.filter(d => d.position);
-  const getPinNumber = (id: string) => allResourcePins.findIndex(d => d.id === id) + 1;
+  const chronologicalPins = [...allResourcePins].reverse();
+  const getPinNumber = (id: string) => chronologicalPins.findIndex(d => d.id === id) + 1;
 
   const pageGroups: Record<number, Discussion[]> = {};
   sidebarDiscussions.forEach(d => {
@@ -259,52 +392,109 @@ export default function Viewer() {
     setDiscussionDialogOpen(true);
   };
 
-  const submitDiscussion = () => {
+  // POST /api/discussions
+  const submitDiscussion = async () => {
     if (!newQuestion.trim() || !selectedFile) return;
-    const newDisc: Discussion = {
-      id: `d${Date.now()}`,
-      resourceId: activeDocument,
-      user: { name: "You", avatar: "ST" },
-      course: selectedFile.course,
-      question: newQuestion.trim(),
-      page: currentPage,
-      time: "Just now",
-      status: "Open",
-      replies: [],
-      position: pendingPosition ?? undefined,
-    };
-    setDiscussions(prev => [newDisc, ...prev]);
-    setNewQuestion("");
-    setPendingPosition(null);
-    setDiscussionDialogOpen(false);
-    setExpandedThread(newDisc.id);
-    setPageFilter("current");
+
+    setSubmittingDiscussion(true);
+    setDiscussionSubmitError(null);
+
+    try {
+      const res = await authFetch("/discussions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resource: activeDocument,
+          question: newQuestion.trim(),
+          page: currentPage,
+          position: pendingPosition ?? undefined,
+        }),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.message ?? `Request failed with status ${res.status}`);
+      }
+
+      const payload = await res.json();
+      const created = toDiscussionView(payload.data, selectedFile.course);
+
+      setDiscussions(prev => [created, ...prev]);
+      setNewQuestion("");
+      setPendingPosition(null);
+      setDiscussionDialogOpen(false);
+      setExpandedThread(created.id);
+      setPageFilter("current");
+    } catch (err) {
+      console.error("Failed to create discussion:", err);
+      setDiscussionSubmitError(err instanceof Error ? err.message : "Failed to post discussion");
+    } finally {
+      setSubmittingDiscussion(false);
+    }
   };
 
-  const sendReply = (discussionId: string) => {
+  // POST /api/discussions/:id/replies
+  // NOTE: addReply only populates replies.user server-side, not the thread's
+  // top-level user — so we merge just the replies array in rather than
+  // replacing the whole discussion object.
+  const sendReply = async (discussionId: string) => {
     const text = replyTexts[discussionId]?.trim();
     if (!text) return;
-    const newReply: Reply = {
-      user: { name: "You", avatar: "ST" },
-      message: text,
-      time: "Just now",
-    };
-    setDiscussions(prev =>
-      prev.map(d => d.id === discussionId ? { ...d, replies: [...d.replies, newReply] } : d)
-    );
-    setReplyTexts(prev => ({ ...prev, [discussionId]: "" }));
+
+    setReplySubmittingId(discussionId);
+
+    try {
+      const res = await authFetch(`/discussions/${discussionId}/replies`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text }),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.message ?? `Request failed with status ${res.status}`);
+      }
+
+      const payload = await res.json();
+      const updatedReplies = (payload.data.replies ?? []).map(toReplyView);
+
+      setDiscussions(prev =>
+        prev.map(d => (d.id === discussionId ? { ...d, replies: updatedReplies } : d))
+      );
+      setReplyTexts(prev => ({ ...prev, [discussionId]: "" }));
+    } catch (err) {
+      console.error("Failed to add reply:", err);
+    } finally {
+      setReplySubmittingId(null);
+    }
   };
 
-  const markResolved = (discussionId: string) => {
+  // PATCH /api/discussions/:id/status
+  // Optimistic toggle with rollback on failure — the endpoint doesn't
+  // repopulate user/replies.user, so there's nothing useful to merge back in
+  // besides the status itself.
+  const markResolved = async (discussionId: string) => {
     setDiscussions(prev =>
-      prev.map(d => d.id === discussionId ? { ...d, status: d.status === "Open" ? "Resolved" : "Open" } : d)
+      prev.map(d => (d.id === discussionId ? { ...d, status: d.status === "Open" ? "Resolved" : "Open" } : d))
     );
+
+    try {
+      const res = await authFetch(`/discussions/${discussionId}/status`, { method: "PATCH" });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.message ?? `Request failed with status ${res.status}`);
+      }
+    } catch (err) {
+      console.error("Failed to toggle discussion status:", err);
+      setDiscussions(prev =>
+        prev.map(d => (d.id === discussionId ? { ...d, status: d.status === "Open" ? "Resolved" : "Open" } : d))
+      );
+    }
   };
 
   const openCount = resourceDiscussions.filter(d => d.status === "Open").length;
 
-  // Loading / error / empty states — bail out before the main layout, which
-  // assumes a `selectedFile` exists.
   if (resourcesLoading) {
     return (
       <div className="h-screen flex flex-col items-center justify-center gap-3 text-muted-foreground bg-background">
@@ -335,7 +525,7 @@ export default function Viewer() {
   return (
     <div ref={containerRef} className="h-screen flex flex-col bg-background overflow-hidden">
       <NavBar
-        searchPlaceholder="Search inside document..."
+        
         hasNotifications={openCount > 0}
         notifOpen={notifOpen}
         onNotifOpenChange={setNotifOpen}
@@ -381,34 +571,23 @@ export default function Viewer() {
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 flex flex-col gap-0.5">
-              {resources.map((resource) => {
-                const resourceDiscs = discussions.filter(d => d.resourceId === resource.id);
-                const openDiscs = resourceDiscs.filter(d => d.status === "Open").length;
-                return (
-                  <button
-                    key={resource.id}
-                    onClick={() => switchDocument(resource.id)}
-                    className={`w-full text-left px-3 py-2.5 rounded-md flex items-start gap-3 transition-colors ${
-                      activeDocument === resource.id
-                        ? "bg-primary/10 text-primary font-medium"
-                        : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-                    }`}
-                  >
-                    <FileText className={`h-4 w-4 shrink-0 mt-0.5 ${activeDocument === resource.id ? "text-primary" : "text-muted-foreground"}`} />
-                    <div className="flex flex-col flex-1 truncate gap-0.5">
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="truncate text-xs leading-relaxed">{resource.title}</span>
-                        {openDiscs > 0 && (
-                          <span className={`shrink-0 text-[10px] font-bold w-4 h-4 rounded-full flex items-center justify-center ${
-                            activeDocument === resource.id ? "bg-primary text-primary-foreground" : "bg-muted-foreground/20 text-muted-foreground"
-                          }`}>{openDiscs}</span>
-                        )}
-                      </div>
-                      <span className="text-[10px] text-muted-foreground">{resource.uploadDate}</span>
-                    </div>
-                  </button>
-                );
-              })}
+              {resources.map((resource) => (
+                <button
+                  key={resource.id}
+                  onClick={() => switchDocument(resource.id)}
+                  className={`w-full text-left px-3 py-2.5 rounded-md flex items-start gap-3 transition-colors ${
+                    activeDocument === resource.id
+                      ? "bg-primary/10 text-primary font-medium"
+                      : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                  }`}
+                >
+                  <FileText className={`h-4 w-4 shrink-0 mt-0.5 ${activeDocument === resource.id ? "text-primary" : "text-muted-foreground"}`} />
+                  <div className="flex flex-col flex-1 truncate gap-0.5">
+                    <span className="truncate text-xs leading-relaxed">{resource.title}</span>
+                    <span className="text-[10px] text-muted-foreground">{resource.uploadDate}</span>
+                  </div>
+                </button>
+              ))}
             </div>
           </ScrollArea>
         </aside>
@@ -435,6 +614,17 @@ export default function Viewer() {
               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setZoomIndex(i => Math.min(ZOOM_LEVELS.length - 1, i + 1))} disabled={zoomIndex === ZOOM_LEVELS.length - 1}>
                 <ZoomIn className="h-4 w-4" />
               </Button>
+            <div className="flex items-center gap-2 px-2">
+  {showPins ? <Eye className="h-3.5 w-3.5 text-muted-foreground" /> : <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />}
+  <Label htmlFor="show-pins-toggle" className="text-xs text-muted-foreground cursor-pointer select-none">
+    Pins
+  </Label>
+  <Switch
+    id="show-pins-toggle"
+    checked={showPins}
+    onCheckedChange={setShowPins}
+  />
+</div>
             </div>
             <div className="flex items-center gap-1">
               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleDownload}>
@@ -503,7 +693,7 @@ export default function Viewer() {
                 />
               )}
 
-              {currentPagePins.map((disc) => {
+              {showPins && currentPagePins.map((disc) => {
                 if (!disc.position) return null;
                 const num = getPinNumber(disc.id);
                 return (
@@ -618,7 +808,21 @@ export default function Viewer() {
 
           <ScrollArea className="flex-1">
             <div className="p-3 flex flex-col gap-3">
-              {sidebarDiscussions.length === 0 && (
+              {discussionsLoading && (
+                <div className="flex items-center justify-center gap-2 text-muted-foreground text-sm py-10">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading discussions...
+                </div>
+              )}
+
+              {!discussionsLoading && discussionsError && (
+                <div className="text-center text-muted-foreground text-sm py-10 flex flex-col items-center gap-2">
+                  <AlertTriangle className="h-6 w-6 text-destructive" />
+                  <p>{discussionsError}</p>
+                </div>
+              )}
+
+              {!discussionsLoading && !discussionsError && sidebarDiscussions.length === 0 && (
                 <div className="text-center text-muted-foreground text-sm py-10 flex flex-col items-center gap-3">
                   <MessageSquare className="h-8 w-8 opacity-30" />
                   <div>
@@ -634,7 +838,7 @@ export default function Viewer() {
                 </div>
               )}
 
-              {pageFilter === "all"
+              {!discussionsLoading && !discussionsError && pageFilter === "all"
                 ? sortedPages.map(page => (
                     <div key={page} className="flex flex-col gap-2">
                       <button
@@ -664,11 +868,12 @@ export default function Viewer() {
                           onReplyTextChange={(v) => setReplyTexts(prev => ({ ...prev, [discussion.id]: v }))}
                           pinNumber={discussion.position ? getPinNumber(discussion.id) : undefined}
                           onJumpToPage={() => jumpToPage(discussion.page)}
+                          replySubmitting={replySubmittingId === discussion.id}
                         />
                       ))}
                     </div>
                   ))
-                : sidebarDiscussions.map(discussion => (
+                : !discussionsLoading && !discussionsError && sidebarDiscussions.map(discussion => (
                     <DiscussionCard
                       key={discussion.id}
                       discussion={discussion}
@@ -680,6 +885,7 @@ export default function Viewer() {
                       onReplyTextChange={(v) => setReplyTexts(prev => ({ ...prev, [discussion.id]: v }))}
                       pinNumber={discussion.position ? getPinNumber(discussion.id) : undefined}
                       onJumpToPage={() => jumpToPage(discussion.page)}
+                      replySubmitting={replySubmittingId === discussion.id}
                     />
                   ))
               }
@@ -695,7 +901,7 @@ export default function Viewer() {
         </aside>
       </div>
 
-      <Dialog open={discussionDialogOpen} onOpenChange={(open) => { if (!open) { setDiscussionDialogOpen(false); setPendingPosition(null); } }}>
+      <Dialog open={discussionDialogOpen} onOpenChange={(open) => { if (!open) { setDiscussionDialogOpen(false); setPendingPosition(null); setDiscussionSubmitError(null); } }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -722,11 +928,16 @@ export default function Viewer() {
                 onKeyDown={(e) => { if (e.key === "Enter" && e.ctrlKey) submitDiscussion(); }}
               />
               <p className="text-[11px] text-muted-foreground">Press Ctrl+Enter to post</p>
+              {discussionSubmitError && (
+                <p className="text-[11px] text-destructive">{discussionSubmitError}</p>
+              )}
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setDiscussionDialogOpen(false); setPendingPosition(null); }}>Cancel</Button>
-            <Button onClick={submitDiscussion} disabled={!newQuestion.trim()}>Post Discussion</Button>
+            <Button variant="outline" onClick={() => { setDiscussionDialogOpen(false); setPendingPosition(null); setDiscussionSubmitError(null); }}>Cancel</Button>
+            <Button onClick={submitDiscussion} disabled={!newQuestion.trim() || submittingDiscussion}>
+              {submittingDiscussion ? "Posting..." : "Post Discussion"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -744,9 +955,10 @@ interface DiscussionCardProps {
   onReplyTextChange: (v: string) => void;
   pinNumber?: number;
   onJumpToPage: () => void;
+  replySubmitting: boolean;
 }
 
-function DiscussionCard({ discussion, expanded, onToggle, onReply, onMarkResolved, replyText, onReplyTextChange, pinNumber, onJumpToPage }: DiscussionCardProps) {
+function DiscussionCard({ discussion, expanded, onToggle, onReply, onMarkResolved, replyText, onReplyTextChange, pinNumber, onJumpToPage, replySubmitting }: DiscussionCardProps) {
   return (
     <Card
       className={`overflow-hidden transition-all duration-200 border-l-4 ${
@@ -830,9 +1042,10 @@ function DiscussionCard({ discussion, expanded, onToggle, onReply, onMarkResolve
                   value={replyText}
                   onChange={(e) => onReplyTextChange(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onReply(); } }}
+                  disabled={replySubmitting}
                 />
-                <Button size="icon" className="h-8 w-8 shrink-0" onClick={onReply} disabled={!replyText.trim()}>
-                  <Send className="h-3 w-3" />
+                <Button size="icon" className="h-8 w-8 shrink-0" onClick={onReply} disabled={!replyText.trim() || replySubmitting}>
+                  {replySubmitting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
                 </Button>
               </div>
             </div>

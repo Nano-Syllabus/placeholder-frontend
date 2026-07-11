@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -13,13 +13,12 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   AreaChart, Area, LineChart, Line
 } from "recharts";
-import { useEffect } from "react";
 import {
   BookOpen, Users, FileText, MessageSquare, Plus,
   ArrowUpRight, CheckCircle2, TrendingUp, Upload, Eye, FileCheck, X,
 } from "lucide-react";
 import {
-  MOCK_COURSES, MOCK_RESOURCES, INITIAL_DISCUSSIONS,
+  MOCK_COURSES,
   CHART_ACTIVITY_DATA, CHART_UPLOADS_DATA, CHART_ENGAGEMENT_DATA,
   type Discussion
 } from "@/lib/mock-data";
@@ -28,14 +27,151 @@ import { authFetch } from "@/lib/auth-context";
 import { motion, AnimatePresence } from "framer-motion";
 import { NavBar } from "@/components/Dashboard-viewer-navbar";
 
+// ---------------------------------------------------------------------------
+// Resource types — same shape as GET /api/courses/resources/all in Viewer.tsx
+// ---------------------------------------------------------------------------
+
+interface ResourceRecord {
+  _id: string;
+  title: string;
+  course: { _id: string; title: string } | string;
+  uploadedBy: { _id: string; user_name: string; profile_pic?: string } | string;
+  fileUrl: string;
+  fileSize: number;
+  pages?: number;
+  createdAt?: string;
+}
+
+interface ResourceView {
+  id: string;
+  title: string;
+  course: string;
+  uploadDate: string;
+  discussions: number;
+  file: string;
+}
+
+function courseTitleFromResource(record: { course: ResourceRecord["course"] }): string {
+  if (typeof record.course === "string") return record.course;
+  if (record.course && typeof record.course === "object" && "title" in record.course) {
+    return (record.course as { title?: string }).title || "Untitled course";
+  }
+  return "Untitled course";
+}
+
+function toResourceView(record: ResourceRecord, discussionCount: number): ResourceView {
+  const uploadDate = record.createdAt
+    ? new Date(record.createdAt).toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      })
+    : "Unknown date";
+
+  return {
+    id: record._id,
+    title: record.title ?? "Untitled",
+    course: courseTitleFromResource(record),
+    uploadDate,
+    discussions: discussionCount,
+    file: record.fileUrl,
+  };
+}
+
+function extractResourceArray(payload: unknown): ResourceRecord[] {
+  if (Array.isArray(payload)) return payload as ResourceRecord[];
+  if (payload && typeof payload === "object") {
+    const obj = payload as Record<string, unknown>;
+    if (Array.isArray(obj.data)) return obj.data as ResourceRecord[];
+    if (obj.data && typeof obj.data === "object") {
+      const inner = obj.data as Record<string, unknown>;
+      if (Array.isArray(inner.resources)) return inner.resources as ResourceRecord[];
+    }
+    if (Array.isArray(obj.resources)) return obj.resources as ResourceRecord[];
+  }
+  return [];
+}
+
+// ---------------------------------------------------------------------------
+// Discussion types — same shape as GET /api/discussions?resource=<id> in
+// Viewer.tsx. Reused here so the dashboard's metrics/notifications reflect
+// real threads instead of INITIAL_DISCUSSIONS mock data.
+// ---------------------------------------------------------------------------
+
+interface DiscussionUserRecord {
+  _id: string;
+  user_name: string;
+  profile_pic?: string;
+}
+
+interface ReplyRecord {
+  user: DiscussionUserRecord | string;
+  message: string;
+  createdAt?: string;
+}
+
+interface DiscussionRecord {
+  _id: string;
+  resource: string;
+  user: DiscussionUserRecord | string;
+  question: string;
+  page: number;
+  status: "Open" | "Resolved";
+  replies: ReplyRecord[];
+  createdAt?: string;
+}
+
+function getInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+function toDiscussionUser(user: DiscussionUserRecord | string | undefined): { name: string; avatar: string } {
+  if (user && typeof user === "object" && "user_name" in user) {
+    return { name: user.user_name, avatar: getInitials(user.user_name) };
+  }
+  return { name: "Unknown user", avatar: "?" };
+}
+
+function formatRelativeTime(dateString?: string): string {
+  if (!dateString) return "";
+  const date = new Date(dateString);
+  const diffMs = Date.now() - date.getTime();
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return "Just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function toDiscussionView(record: DiscussionRecord, courseTitle: string): Discussion {
+  return {
+    id: record._id,
+    resourceId: record.resource,
+    user: toDiscussionUser(record.user),
+    course: courseTitle,
+    question: record.question,
+    page: record.page,
+    time: formatRelativeTime(record.createdAt),
+    status: record.status,
+    replies: [], // replies.user isn't needed on the dashboard, skip mapping them
+    position: undefined,
+  };
+}
+
 export default function Dashboard() {
   const [, setLocation] = useLocation();
   const [uploadOpen, setUploadOpen] = useState(false);
   const [createCourseOpen, setCreateCourseOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [successBanner, setSuccessBanner] = useState<string | null>(null);
- 
-  const [discussions] = useState<Discussion[]>(INITIAL_DISCUSSIONS);
+
+  const [discussions, setDiscussions] = useState<Discussion[]>([]);
 
   // Upload form state
   const [uploadTitle, setUploadTitle] = useState("");
@@ -43,11 +179,15 @@ export default function Dashboard() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-const [courses, setCourses] = useState<typeof MOCK_COURSES>([]);
-const [resources, setResources] = useState(MOCK_RESOURCES);
-const [coursesLoading, setCoursesLoading] = useState(true);
-const [coursesError, setCoursesError] = useState<string | null>(null);
-const [students, setStudents] = useState([]);
+
+  const [courses, setCourses] = useState<typeof MOCK_COURSES>([]);
+  const [resources, setResources] = useState<ResourceView[]>([]);
+  const [resourcesLoading, setResourcesLoading] = useState(true);
+  const [resourcesError, setResourcesError] = useState<string | null>(null);
+  const [coursesLoading, setCoursesLoading] = useState(true);
+  const [coursesError, setCoursesError] = useState<string | null>(null);
+  const [students, setStudents] = useState<any[]>([]);
+
   // Create course form state
   const [courseName, setCourseName] = useState("");
   const [courseDesc, setCourseDesc] = useState("");
@@ -57,49 +197,96 @@ const [students, setStudents] = useState([]);
     setSuccessBanner(msg);
     setTimeout(() => setSuccessBanner(null), 3500);
   };
-const fetchStudents = async() => {
-  
-    const res = await authFetch("/students");
-    const data = await res.json();
-  setStudents(data.data);
-  
-}
-useEffect(() => {
-  fetchStudents()
-  let cancelled = false;
 
-  async function fetchCourses() {
-    setCoursesLoading(true);
-    setCoursesError(null);
-    try {
-      const res = await authFetch("/courses");
-      const data = await res.json();
+  useEffect(() => {
+    let cancelled = false;
 
-      if (!res.ok) throw new Error(data.message ?? "Failed to load courses");
-      if (!cancelled) setCourses(data.body.courses);
-    } catch (err) {
-      if (!cancelled) {
-        setCoursesError(err instanceof Error ? err.message : "Something went wrong.");
-      }
-    } finally {
-      if (!cancelled) setCoursesLoading(false);
-    }
-  }
-    const getResource = async() => {
-        const res = await authFetch("/courses/resources/all", {
-          method: "GET"
-        });
-
+    async function fetchStudents() {
+      try {
+        const res = await authFetch("/students");
+        if (!res.ok) throw new Error(`Request failed with status ${res.status}`);
         const data = await res.json();
-        console.log(data)
+        if (!cancelled) setStudents(data.data ?? []);
+      } catch (err) {
+        console.error("Failed to load students:", err);
       }
+    }
 
-      getResource();
-  fetchCourses();
-  return () => {
-    cancelled = true;
-  };
-}, []);
+    async function fetchCourses() {
+      setCoursesLoading(true);
+      setCoursesError(null);
+      try {
+        const res = await authFetch("/courses");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message ?? "Failed to load courses");
+        if (!cancelled) setCourses(data.body.courses);
+      } catch (err) {
+        if (!cancelled) {
+          setCoursesError(err instanceof Error ? err.message : "Something went wrong.");
+        }
+      } finally {
+        if (!cancelled) setCoursesLoading(false);
+      }
+    }
+
+    // Fetches resources, then fetches discussions per-resource in parallel
+    // and merges everything into the dashboard's flat discussions list.
+    // See note above the component: this is N+1 requests since the API has
+    // no "all discussions for this teacher" endpoint yet.
+    async function fetchResourcesAndDiscussions() {
+      setResourcesLoading(true);
+      setResourcesError(null);
+      try {
+        const res = await authFetch("/courses/resources/all", { method: "GET" });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.message ?? `Request failed with status ${res.status}`);
+        }
+        const payload = await res.json();
+        const records = extractResourceArray(payload);
+
+        if (cancelled) return;
+
+        const discussionResults = await Promise.all(
+          records.map(async (record) => {
+            try {
+              const dRes = await authFetch(`/discussions?resource=${record._id}`, { method: "GET" });
+              if (!dRes.ok) return [] as DiscussionRecord[];
+              const dPayload = await dRes.json();
+              return Array.isArray(dPayload?.data) ? (dPayload.data as DiscussionRecord[]) : [];
+            } catch {
+              return [] as DiscussionRecord[];
+            }
+          })
+        );
+
+        if (cancelled) return;
+
+        const resourceViews = records.map((record, i) => toResourceView(record, discussionResults[i].length));
+        const allDiscussions = records.flatMap((record, i) =>
+          discussionResults[i].map(d => toDiscussionView(d, courseTitleFromResource(record)))
+        );
+
+        setResources(resourceViews);
+        setDiscussions(allDiscussions);
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Failed to load resources/discussions:", err);
+        setResourcesError(err instanceof Error ? err.message : "Failed to load resources");
+      } finally {
+        if (!cancelled) setResourcesLoading(false);
+      }
+    }
+
+    fetchStudents();
+    fetchCourses();
+    fetchResourcesAndDiscussions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleCreateCourse = async () => {
     if (!courseName.trim()) return;
     setIsCreatingCourse(true);
@@ -154,15 +341,16 @@ useEffect(() => {
         body: formData,
       });
       const data = await res.json();
-      
+
       if (!res.ok) throw new Error(data.message ?? "Upload failed");
-      
-      setResources(prev => [data.body.resource, ...prev]);
+
+      const created = toResourceView(data.body.resource, 0);
+      setResources(prev => [created, ...prev]);
       setUploadTitle("");
       setUploadCourse("");
       setSelectedFile(null);
       setUploadOpen(false);
-      showSuccess(`"${data.body.resource.title}" uploaded successfully.`);
+      showSuccess(`"${created.title}" uploaded successfully.`);
     } catch (err) {
       showSuccess(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
@@ -173,9 +361,9 @@ useEffect(() => {
   const openDiscussions = discussions.filter(d => d.status === "Open");
   const metrics = [
     { title: "Total Courses", value: String(courses.length), icon: BookOpen, trend: "+2 this month" },
-    { title: "Total Students", value: students.length, icon: Users, trend: "+12% vs last month" },
+    { title: "Total Students", value: String(students.length), icon: Users, trend: "+12% vs last month" },
     { title: "Resources Uploaded", value: String(resources.length), icon: FileText, trend: "+8 this week" },
-    { title: "Active Discussions", value: String(discussions.filter(d => d.status === "Open").length), icon: MessageSquare, trend: "+24 today" },
+    { title: "Active Discussions", value: String(openDiscussions.length), icon: MessageSquare, trend: "+24 today" },
   ];
 
   return (
@@ -287,17 +475,17 @@ useEffect(() => {
 
         {/* Charts Section */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-         <Card className="lg:col-span-2 shadow-sm border-muted">
-  <CardHeader className="flex flex-row items-center justify-between pb-2">
-    <div className="space-y-1">
-      <CardTitle className="text-base font-semibold">Recent Courses</CardTitle>
-      <CardDescription>Your active teaching environments</CardDescription>
-    </div>
-    <Button variant="ghost" size="sm" className="text-primary h-8" data-testid="button-view-all-courses">
-      View All
-    </Button>
-  </CardHeader>
-  <CardContent>
+          <Card className="lg:col-span-2 shadow-sm border-muted">
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <div className="space-y-1">
+                <CardTitle className="text-base font-semibold">Recent Courses</CardTitle>
+                <CardDescription>Your active teaching environments</CardDescription>
+              </div>
+              <Button variant="ghost" size="sm" className="text-primary h-8" data-testid="button-view-all-courses">
+                View All
+              </Button>
+            </CardHeader>
+            <CardContent>
               <div className="h-[220px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={CHART_ACTIVITY_DATA} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
