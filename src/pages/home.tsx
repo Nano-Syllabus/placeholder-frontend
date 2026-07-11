@@ -1,6 +1,7 @@
 import { Navbar } from "@/components/navbar";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { FileText, MessageSquare, LayoutDashboard, Shield, Users, ArrowRight, BookOpen } from "lucide-react";
+import { FileText, MessageSquare, LayoutDashboard, Shield, Users, ArrowRight, CheckCircle2, BookOpen } from "lucide-react";
 import { Link } from "wouter";
 import { motion } from "framer-motion";
 

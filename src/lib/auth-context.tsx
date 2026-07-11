@@ -87,7 +87,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    authFetch("/me")
+    authFetch("/auth/me")
       .then((r) => (r.ok ? r.json() : null))
       .then((data: { body?: { user?: Record<string, unknown> } } | null) => {
         if (data?.body?.user) {

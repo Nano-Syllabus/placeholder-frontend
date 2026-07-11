@@ -85,7 +85,16 @@ useEffect(() => {
       if (!cancelled) setCoursesLoading(false);
     }
   }
+    const getResource = async() => {
+        const res = await authFetch("/courses/resources/all", {
+          method: "GET"
+        });
 
+        const data = await res.json();
+        console.log(data)
+      }
+
+      getResource();
   fetchCourses();
   return () => {
     cancelled = true;
@@ -145,8 +154,9 @@ useEffect(() => {
         body: formData,
       });
       const data = await res.json();
+      
       if (!res.ok) throw new Error(data.message ?? "Upload failed");
-
+      
       setResources(prev => [data.body.resource, ...prev]);
       setUploadTitle("");
       setUploadCourse("");

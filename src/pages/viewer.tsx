@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
@@ -14,20 +14,109 @@ import { Label } from "@/components/ui/label";
 import {
   Download, Maximize, Minimize, ZoomIn, ZoomOut,
   ChevronLeft, ChevronRight, MessageSquare, Send, CheckCircle2, Circle,
-  FileText, X, MapPin, Loader2, Layers
+  FileText, X, MapPin, Loader2, Layers, AlertTriangle
 } from "lucide-react";
-import { MOCK_RESOURCES, INITIAL_DISCUSSIONS, type Discussion, type Reply, type PinPosition } from "@/lib/mock-data";
+import { INITIAL_DISCUSSIONS, type Discussion, type Reply, type PinPosition } from "@/lib/mock-data";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { motion, AnimatePresence } from "framer-motion";
 import { NavBar } from "@/components/Dashboard-viewer-navbar";
+import { authFetch } from "@/lib/auth-context";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
 
 const ZOOM_LEVELS = [50, 75, 100, 125, 150, 200];
 const BASE_PAGE_WIDTH = 760;
 
+// ---------------------------------------------------------------------------
+// Resource types
+//
+// `ResourceRecord` is the raw shape returned by GET /api/courses/resources/all
+// (mirrors the `resources` Mongoose schema, with `course`/`uploadedBy`
+// populated). `ResourceView` is what this component actually renders —
+// same field names the JSX below already expected from mock data
+// (title, course, uploadDate, pages, file), so the rest of the component
+// didn't need to change shape.
+// ---------------------------------------------------------------------------
+
+interface ResourceRecord {
+  _id: string;
+  title: string;
+  course: { _id: string; title: string } | string;
+  uploadedBy: { _id: string; user_name: string; profile_pic?: string } | string;
+  fileUrl: string;
+  fileSize: number;
+  pages?: number;
+  createdAt?: string;
+}
+
+interface ResourceView {
+  id: string;
+  title: string;
+  course: string;
+  uploadDate: string;
+  pages?: number;
+  file: string;
+}
+
+/** fileUrl as stored is a server-relative path (e.g. "/uploads/xyz.pdf"). Proxy
+ *  "/uploads" to the API server in vite.config.ts the same way "/api" is proxied,
+ *  or this will need to be an absolute URL to your API's origin instead. */
+function toResourceView(record: ResourceRecord): ResourceView {
+  // `course` may come back populated ({ _id, title }), as a raw ObjectId
+  // string (if populate() wasn't applied), or null/undefined — handle all three
+  // rather than assuming populate always ran.
+  let courseTitle = "Untitled course";
+  if (typeof record.course === "string") {
+    courseTitle = record.course;
+  } else if (record.course && typeof record.course === "object" && "title" in record.course) {
+    courseTitle = (record.course as { title?: string }).title || "Untitled course";
+  }
+
+  const uploadDate = record.createdAt
+    ? new Date(record.createdAt).toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      })
+    : "Unknown date";
+
+  return {
+    id: record._id,
+    title: record.title ?? "Untitled",
+    course: courseTitle,
+    uploadDate,
+    pages: record.pages,
+    file: record.fileUrl,
+  };
+}
+
+/**
+ * The backend response has been observed varying in shape (top-level array,
+ * `{ data: [...] }`, or `{ data: { resources: [...] } }`). Normalize all of
+ * them here instead of assuming one shape and crashing when it's different.
+ */
+function extractResourceArray(payload: unknown): ResourceRecord[] {
+  if (Array.isArray(payload)) return payload as ResourceRecord[];
+
+  if (payload && typeof payload === "object") {
+    const obj = payload as Record<string, unknown>;
+    if (Array.isArray(obj.data)) return obj.data as ResourceRecord[];
+    if (obj.data && typeof obj.data === "object") {
+      const inner = obj.data as Record<string, unknown>;
+      if (Array.isArray(inner.resources)) return inner.resources as ResourceRecord[];
+    }
+    if (Array.isArray(obj.resources)) return obj.resources as ResourceRecord[];
+  }
+
+  throw new Error("Unrecognized response shape for resources");
+}
+
 export default function Viewer() {
-  const [activeDocument, setActiveDocument] = useState(MOCK_RESOURCES[0].id);
+  const [resources, setResources] = useState<ResourceView[]>([]);
+  const [resourcesLoading, setResourcesLoading] = useState<boolean>(true);
+  const [resourcesError, setResourcesError] = useState<string | null>(null);
+
+  const [activeDocument, setActiveDocument] = useState<string>("");
   const [expandedThread, setExpandedThread] = useState<string | null>(null);
   const [replyTexts, setReplyTexts] = useState<Record<string, string>>({});
   const [discussions, setDiscussions] = useState<Discussion[]>(INITIAL_DISCUSSIONS);
@@ -48,8 +137,50 @@ export default function Viewer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const docAreaRef = useRef<HTMLDivElement>(null);
 
-  const selectedFile = MOCK_RESOURCES.find(r => r.id === activeDocument)!;
-  const totalPages = numPages ?? selectedFile.pages;
+  // GET /api/courses/resources/all
+  useEffect(() => {
+    let cancelled = false;
+
+    const getResources = async () => {
+      setResourcesLoading(true);
+      setResourcesError(null);
+
+      try {
+        const res = await authFetch("/courses/resources/all", { method: "GET" });
+
+        if (!res.ok) {
+          // Try to surface the server's own error message; fall back to the status.
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.message ?? `Request failed with status ${res.status}`);
+        }
+
+        const payload = await res.json();
+        const records = extractResourceArray(payload);
+        const mapped = records.map(toResourceView);
+
+        if (cancelled) return;
+        setResources(mapped);
+        if (mapped.length > 0) setActiveDocument(mapped[0].id);
+      } catch (err) {
+        if (cancelled) return;
+        // Log the real error — a generic banner alone won't tell you whether
+        // this was an auth failure, a network error, or a bad response shape.
+        console.error("Failed to load resources:", err);
+        setResourcesError(err instanceof Error ? err.message : "Failed to load resources");
+      } finally {
+        if (!cancelled) setResourcesLoading(false);
+      }
+    };
+
+    getResources();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const selectedFile = resources.find(r => r.id === activeDocument);
+  const totalPages = numPages ?? selectedFile?.pages ?? 1;
   const zoomLevel = ZOOM_LEVELS[zoomIndex];
   const pageWidth = (zoomLevel / 100) * BASE_PAGE_WIDTH;
 
@@ -99,15 +230,13 @@ export default function Viewer() {
   };
 
   const handleDownload = () => {
-    if (selectedFile.file) {
-      const a = document.createElement("a");
-      a.href = `${import.meta.env.BASE_URL.replace(/\/$/, "")}${selectedFile.file}`;
-      a.download = selectedFile.title;
-      a.click();
-    } else {
-      setDownloadToast(true);
-      setTimeout(() => setDownloadToast(false), 3000);
-    }
+    if (!selectedFile) return;
+    const a = document.createElement("a");
+    a.href = selectedFile.file;
+    a.download = selectedFile.title;
+    a.click();
+    setDownloadToast(true);
+    setTimeout(() => setDownloadToast(false), 3000);
   };
 
   const handleFullscreen = () => {
@@ -131,7 +260,7 @@ export default function Viewer() {
   };
 
   const submitDiscussion = () => {
-    if (!newQuestion.trim()) return;
+    if (!newQuestion.trim() || !selectedFile) return;
     const newDisc: Discussion = {
       id: `d${Date.now()}`,
       resourceId: activeDocument,
@@ -173,6 +302,35 @@ export default function Viewer() {
   };
 
   const openCount = resourceDiscussions.filter(d => d.status === "Open").length;
+
+  // Loading / error / empty states — bail out before the main layout, which
+  // assumes a `selectedFile` exists.
+  if (resourcesLoading) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center gap-3 text-muted-foreground bg-background">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <span className="text-sm">Loading resources...</span>
+      </div>
+    );
+  }
+
+  if (resourcesError) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center gap-3 text-muted-foreground bg-background px-4 text-center">
+        <AlertTriangle className="h-8 w-8 text-destructive" />
+        <span className="text-sm">{resourcesError}</span>
+      </div>
+    );
+  }
+
+  if (!selectedFile) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center gap-3 text-muted-foreground bg-background px-4 text-center">
+        <FileText className="h-8 w-8 opacity-40" />
+        <span className="text-sm">No resources have been uploaded yet.</span>
+      </div>
+    );
+  }
 
   return (
     <div ref={containerRef} className="h-screen flex flex-col bg-background overflow-hidden">
@@ -223,7 +381,7 @@ export default function Viewer() {
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 flex flex-col gap-0.5">
-              {MOCK_RESOURCES.map((resource) => {
+              {resources.map((resource) => {
                 const resourceDiscs = discussions.filter(d => d.resourceId === resource.id);
                 const openDiscs = resourceDiscs.filter(d => d.status === "Open").length;
                 return (
@@ -314,48 +472,29 @@ export default function Viewer() {
               style={{ width: pageWidth, maxWidth: "100%" }}
               onClick={handleDocClick}
             >
-              {selectedFile.file ? (
-                <>
-                  {pdfLoading && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-card z-10 rounded-sm shadow-lg" style={{ minHeight: 960 }}>
-                      <div className="flex flex-col items-center gap-3 text-muted-foreground">
-                        <Loader2 className="h-8 w-8 animate-spin text-primary" />
-                        <span className="text-sm">Loading document...</span>
-                      </div>
-                    </div>
-                  )}
-                  <Document
-                    file={`${import.meta.env.BASE_URL.replace(/\/$/, "")}${selectedFile.file}`}
-                    onLoadSuccess={handleDocumentLoadSuccess}
-                    onLoadError={() => setPdfLoading(false)}
-                    className="shadow-2xl rounded-sm overflow-hidden"
-                    loading=""
-                  >
-                    <Page
-                      pageNumber={currentPage}
-                      width={pageWidth}
-                      renderAnnotationLayer={false}
-                      renderTextLayer={true}
-                      className="select-none"
-                    />
-                  </Document>
-                </>
-              ) : (
-                <div className="bg-card border rounded-sm shadow-lg flex flex-col p-12 select-none" style={{ minHeight: (zoomLevel / 100) * 1056 }}>
-                  <div className="flex flex-col gap-4 opacity-70 pointer-events-none">
-                    <div className="text-center mb-4">
-                      <div className="text-sm font-bold text-foreground/80 mb-1">{selectedFile.course}</div>
-                      <div className="text-xs text-muted-foreground">{selectedFile.title} — Page {currentPage} of {totalPages}</div>
-                    </div>
-                    <div className="h-6 bg-muted rounded w-2/3 mb-2" />
-                    {[...Array(6)].map((_, i) => <div key={i} className="h-3 bg-muted rounded w-full" />)}
-                    <div className="h-40 bg-muted/40 rounded-lg w-full my-4 flex items-center justify-center border-2 border-dashed border-muted-foreground/20">
-                      <span className="text-muted-foreground font-mono text-sm">Figure {currentPage}.1</span>
-                    </div>
-                    {[...Array(5)].map((_, i) => <div key={i} className="h-3 bg-muted rounded w-full" />)}
+              {pdfLoading && (
+                <div className="absolute inset-0 flex items-center justify-center bg-card z-10 rounded-sm shadow-lg" style={{ minHeight: 960 }}>
+                  <div className="flex flex-col items-center gap-3 text-muted-foreground">
+                    <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                    <span className="text-sm">Loading document...</span>
                   </div>
                 </div>
               )}
+              <Document
+                file={selectedFile.file}
+                onLoadSuccess={handleDocumentLoadSuccess}
+                onLoadError={() => setPdfLoading(false)}
+                className="shadow-2xl rounded-sm overflow-hidden"
+                loading=""
+              >
+                <Page
+                  pageNumber={currentPage}
+                  width={pageWidth}
+                  renderAnnotationLayer={false}
+                  renderTextLayer={true}
+                  className="select-none"
+                />
+              </Document>
 
               {placingPin && (
                 <div

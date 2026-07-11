@@ -2,10 +2,14 @@ import { Link, useLocation } from "wouter";
 import { Moon, Sun, BookOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/components/theme-provider";
+import { useAuth } from "@/lib/auth-context";
+import { navigate } from "wouter/use-browser-location";
 
 export function Navbar() {
   const { theme, setTheme } = useTheme();
   const [location] = useLocation();
+   const { user } = useAuth();
+
 
   return (
     <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -39,6 +43,14 @@ export function Navbar() {
             <Sun className="h-[1.2rem] w-[1.2rem] rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
             <Moon className="absolute h-[1.2rem] w-[1.2rem] rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
             <span className="sr-only">Toggle theme</span>
+          </Button>
+
+           <Button
+            variant="ghost"
+            className=" cursor-pointer"
+            onClick={() => navigate("/login")}
+          >
+           {user ? "Log Out" : "Log in"}
           </Button>
           <div className="md:hidden">
             {/* Mobile menu could go here */}

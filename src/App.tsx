@@ -65,7 +65,7 @@ function Router() {
         <RequireGuest><Login /></RequireGuest>
       </Route>
       <Route path="/">
-        <RequireAuth><Home /></RequireAuth>
+       <Home />
       </Route>
       <Route path="/viewer">
         <RequireAuth><Viewer /></RequireAuth>
