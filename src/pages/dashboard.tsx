@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -59,6 +59,14 @@ function courseTitleFromResource(record: { course: ResourceRecord["course"] }): 
   return "Untitled course";
 }
 
+function courseIdFromResource(record: { course: ResourceRecord["course"] }): string | undefined {
+  if (typeof record.course === "string") return record.course;
+  if (record.course && typeof record.course === "object" && "_id" in record.course) {
+    return (record.course as { _id?: string })._id;
+  }
+  return undefined;
+}
+
 function toResourceView(record: ResourceRecord, discussionCount: number): ResourceView {
   const uploadDate = record.createdAt
     ? new Date(record.createdAt).toLocaleDateString(undefined, {
@@ -94,8 +102,7 @@ function extractResourceArray(payload: unknown): ResourceRecord[] {
 
 // ---------------------------------------------------------------------------
 // Discussion types — same shape as GET /api/discussions?resource=<id> in
-// Viewer.tsx. Reused here so the dashboard's metrics/notifications reflect
-// real threads instead of INITIAL_DISCUSSIONS mock data.
+// Viewer.tsx.
 // ---------------------------------------------------------------------------
 
 interface DiscussionUserRecord {
@@ -135,6 +142,11 @@ function toDiscussionUser(user: DiscussionUserRecord | string | undefined): { na
   return { name: "Unknown user", avatar: "?" };
 }
 
+function extractUserId(user: DiscussionUserRecord | string | undefined): string | undefined {
+  if (!user) return undefined;
+  return typeof user === "string" ? user : user._id;
+}
+
 function formatRelativeTime(dateString?: string): string {
   if (!dateString) return "";
   const date = new Date(dateString);
@@ -159,7 +171,7 @@ function toDiscussionView(record: DiscussionRecord, courseTitle: string): Discus
     page: record.page,
     time: formatRelativeTime(record.createdAt),
     status: record.status,
-    replies: [], // replies.user isn't needed on the dashboard, skip mapping them
+    replies: [],
     position: undefined,
   };
 }
@@ -172,6 +184,11 @@ export default function Dashboard() {
   const [successBanner, setSuccessBanner] = useState<string | null>(null);
 
   const [discussions, setDiscussions] = useState<Discussion[]>([]);
+  // Raw records kept alongside the mapped views above — needed to compute
+  // real stats (unique active students, per-course engagement, activity
+  // over time) without re-fetching.
+  const [discussionRecords, setDiscussionRecords] = useState<DiscussionRecord[]>([]);
+  const [resourceRecords, setResourceRecords] = useState<ResourceRecord[]>([]);
 
   // Upload form state
   const [uploadTitle, setUploadTitle] = useState("");
@@ -229,10 +246,9 @@ export default function Dashboard() {
       }
     }
 
-    // Fetches resources, then fetches discussions per-resource in parallel
-    // and merges everything into the dashboard's flat discussions list.
-    // See note above the component: this is N+1 requests since the API has
-    // no "all discussions for this teacher" endpoint yet.
+    // Fetches resources, then fetches discussions per-resource in parallel.
+    // Keeps both the mapped views (for existing UI) and the raw records
+    // (for the stats computed in the useMemos below).
     async function fetchResourcesAndDiscussions() {
       setResourcesLoading(true);
       setResourcesError(null);
@@ -263,11 +279,14 @@ export default function Dashboard() {
         if (cancelled) return;
 
         const resourceViews = records.map((record, i) => toResourceView(record, discussionResults[i].length));
+        const allDiscussionRecords = discussionResults.flat();
         const allDiscussions = records.flatMap((record, i) =>
           discussionResults[i].map(d => toDiscussionView(d, courseTitleFromResource(record)))
         );
 
+        setResourceRecords(records);
         setResources(resourceViews);
+        setDiscussionRecords(allDiscussionRecords);
         setDiscussions(allDiscussions);
       } catch (err) {
         if (cancelled) return;
@@ -346,6 +365,7 @@ export default function Dashboard() {
 
       const created = toResourceView(data.body.resource, 0);
       setResources(prev => [created, ...prev]);
+      setResourceRecords(prev => [data.body.resource, ...prev]);
       setUploadTitle("");
       setUploadCourse("");
       setSelectedFile(null);
@@ -359,11 +379,130 @@ export default function Dashboard() {
   };
 
   const openDiscussions = discussions.filter(d => d.status === "Open");
+
+  // ---------------------------------------------------------------------
+  // Derived stats from real interactions
+  // ---------------------------------------------------------------------
+
+  // Unique student IDs who've asked a question or posted a reply anywhere.
+  // NOTE: addReply records req.userId regardless of role, so if you (the
+  // teacher) reply to threads, you'll be counted here too — there's no
+  // role check on the backend to exclude teacher replies from this set.
+  const activeStudentIds = useMemo(() => {
+    const ids = new Set<string>();
+    discussionRecords.forEach(d => {
+      const askerId = extractUserId(d.user);
+      if (askerId) ids.add(askerId);
+      d.replies?.forEach(r => {
+        const replierId = extractUserId(r.user);
+        if (replierId) ids.add(replierId);
+      });
+    });
+    return ids;
+  }, [discussionRecords]);
+
+  const discussionsToday = useMemo(() => {
+    const todayKey = new Date().toISOString().slice(0, 10);
+    return discussionRecords.filter(d => d.createdAt?.slice(0, 10) === todayKey).length;
+  }, [discussionRecords]);
+
+  const resourcesThisWeek = useMemo(() => {
+    return resourceRecords.filter(r => {
+      if (!r.createdAt) return false;
+      const diffDays = (Date.now() - new Date(r.createdAt).getTime()) / 86_400_000;
+      return diffDays <= 7;
+    }).length;
+  }, [resourceRecords]);
+
+  // Discussions created per day, last 7 days — powers the "Recent Courses"
+  // area chart. Falls back to mock data until real discussions have loaded.
+  const activityChartData = useMemo(() => {
+    if (discussionRecords.length === 0) return CHART_ACTIVITY_DATA;
+    const days: { key: string; label: string }[] = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      days.push({ key: d.toISOString().slice(0, 10), label: d.toLocaleDateString(undefined, { weekday: "short" }) });
+    }
+    const countsByDay = new Map<string, number>();
+    discussionRecords.forEach(d => {
+      if (!d.createdAt) return;
+      const key = d.createdAt.slice(0, 10);
+      countsByDay.set(key, (countsByDay.get(key) ?? 0) + 1);
+    });
+    return days.map(({ key, label }) => ({ name: label, discussions: countsByDay.get(key) ?? 0 }));
+  }, [discussionRecords]);
+
+  // Active (unique posting students) vs total (enrolled) per course.
+  // Assumes resource.course._id and course.id refer to the same Mongo _id —
+  // worth verifying in the network tab if this renders all zeroes.
+  const engagementChartData = useMemo(() => {
+    if (courses.length === 0 || resourceRecords.length === 0) return CHART_ENGAGEMENT_DATA;
+
+    const resourceToCourseId = new Map(resourceRecords.map(r => [r._id, courseIdFromResource(r)]));
+    const activeByCourse = new Map<string, Set<string>>();
+
+    discussionRecords.forEach(d => {
+      const courseId = resourceToCourseId.get(d.resource);
+      if (!courseId) return;
+      const set = activeByCourse.get(courseId) ?? new Set<string>();
+      const askerId = extractUserId(d.user);
+      if (askerId) set.add(askerId);
+      d.replies?.forEach(r => {
+        const replierId = extractUserId(r.user);
+        if (replierId) set.add(replierId);
+      });
+      activeByCourse.set(courseId, set);
+    });
+
+    return courses.map((c: any) => ({
+      name: c.name.length > 12 ? `${c.name.slice(0, 12)}…` : c.name,
+      active: activeByCourse.get(c.id)?.size ?? 0,
+      total: c.students ?? 0,
+    }));
+  }, [courses, resourceRecords, discussionRecords]);
+
+  // Resources uploaded per week of the current month (rough 4-bucket split,
+  // not precise ISO weeks).
+  const uploadsChartData = useMemo(() => {
+    if (resourceRecords.length === 0) return CHART_UPLOADS_DATA;
+    const now = new Date();
+    const weekBuckets = [0, 0, 0, 0];
+    resourceRecords.forEach(r => {
+      if (!r.createdAt) return;
+      const d = new Date(r.createdAt);
+      if (d.getFullYear() !== now.getFullYear() || d.getMonth() !== now.getMonth()) return;
+      const weekIndex = Math.min(3, Math.floor((d.getDate() - 1) / 7));
+      weekBuckets[weekIndex] += 1;
+    });
+    return weekBuckets.map((count, i) => ({ name: `Week ${i + 1}`, uploads: count }));
+  }, [resourceRecords]);
+
   const metrics = [
-    { title: "Total Courses", value: String(courses.length), icon: BookOpen, trend: "+2 this month" },
-    { title: "Total Students", value: String(students.length), icon: Users, trend: "+12% vs last month" },
-    { title: "Resources Uploaded", value: String(resources.length), icon: FileText, trend: "+8 this week" },
-    { title: "Active Discussions", value: String(openDiscussions.length), icon: MessageSquare, trend: "+24 today" },
+    {
+      title: "Total Courses",
+      value: String(courses.length),
+      icon: BookOpen,
+      trend: `${courses.filter((c: any) => c.status === "Active").length} active`,
+    },
+    {
+      title: "Total Students",
+      value: String(students.length),
+      icon: Users,
+      trend: `${activeStudentIds.size} active in discussions`,
+    },
+    {
+      title: "Resources Uploaded",
+      value: String(resources.length),
+      icon: FileText,
+      trend: `+${resourcesThisWeek} this week`,
+    },
+    {
+      title: "Active Discussions",
+      value: String(openDiscussions.length),
+      icon: MessageSquare,
+      trend: `+${discussionsToday} today`,
+    },
   ];
 
   return (
@@ -478,8 +617,8 @@ export default function Dashboard() {
           <Card className="lg:col-span-2 shadow-sm border-muted">
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <div className="space-y-1">
-                <CardTitle className="text-base font-semibold">Recent Courses</CardTitle>
-                <CardDescription>Your active teaching environments</CardDescription>
+                <CardTitle className="text-base font-semibold">Discussion Activity</CardTitle>
+                <CardDescription>Questions posted per day, last 7 days</CardDescription>
               </div>
               <Button variant="ghost" size="sm" className="text-primary h-8" data-testid="button-view-all-courses">
                 View All
@@ -488,7 +627,7 @@ export default function Dashboard() {
             <CardContent>
               <div className="h-[220px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={CHART_ACTIVITY_DATA} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <AreaChart data={activityChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                     <defs>
                       <linearGradient id="colorDiscussions" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
@@ -509,12 +648,12 @@ export default function Dashboard() {
           <Card className="shadow-sm border-muted">
             <CardHeader>
               <CardTitle className="text-base font-semibold">Student Engagement</CardTitle>
-              <CardDescription>Active vs enrolled</CardDescription>
+              <CardDescription>Active (posted/replied) vs enrolled, per course</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="h-[220px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={CHART_ENGAGEMENT_DATA} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <BarChart data={engagementChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
                     <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} dy={10} />
                     <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
@@ -536,7 +675,7 @@ export default function Dashboard() {
           <CardContent>
             <div className="h-[180px] w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={CHART_UPLOADS_DATA} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <LineChart data={uploadsChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
                   <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} dy={10} />
                   <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
@@ -572,12 +711,12 @@ export default function Dashboard() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {courses.map((course) => (
+                  {courses.map((course: any) => (
                     <TableRow key={course.id} className="border-border group cursor-pointer hover:bg-muted/30">
                       <TableCell className="font-medium text-sm">
                         <div className="flex items-center gap-2">
                           <div className="w-8 h-8 rounded bg-primary/10 flex items-center justify-center text-primary font-bold text-xs shrink-0">
-                            {course.name.split(' ').map(n => n[0]).join('').substring(0, 2)}
+                            {course.name.split(' ').map((n: string) => n[0]).join('').substring(0, 2)}
                           </div>
                           <span className="truncate max-w-[140px] block">{course.name}</span>
                         </div>
@@ -736,7 +875,7 @@ export default function Dashboard() {
                   <SelectValue placeholder="Select a course" />
                 </SelectTrigger>
                 <SelectContent>
-                  {courses.filter(c => c.status === "Active").map(c => (
+                  {courses.filter((c: any) => c.status === "Active").map((c: any) => (
                     <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
                   ))}
                 </SelectContent>
