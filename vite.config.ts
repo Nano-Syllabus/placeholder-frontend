@@ -15,8 +15,8 @@ export default defineConfig({
   },
   server: {
   proxy: {
-    "/api": { target: "http://localhost:3001", changeOrigin: true },
-    "/uploads": { target: "http://localhost:3001", changeOrigin: true },
+    "/api": { target: "https://placeholder-backend-oq4q.onrender.com", changeOrigin: true },
+    "/uploads": { target: "https://placeholder-backend-oq4q.onrender.com", changeOrigin: true },
   },
 },
 });
