@@ -233,10 +233,12 @@ export default function Viewer() {
 
         if (!res.ok) {
           const body = await res.json().catch(() => null);
+          
           throw new Error(body?.message ?? `Request failed with status ${res.status}`);
         }
-
+        
         const payload = await res.json();
+        
         const records = extractResourceArray(payload);
         const mapped = records.map(toResourceView);
 

@@ -16,6 +16,7 @@ import {
 import {
   BookOpen, Users, FileText, MessageSquare, Plus,
   ArrowUpRight, CheckCircle2, TrendingUp, Upload, Eye, FileCheck, X,
+  Loader2, AlertCircle, RefreshCw,
 } from "lucide-react";
 import {
   MOCK_COURSES,
@@ -176,6 +177,28 @@ function toDiscussionView(record: DiscussionRecord, courseTitle: string): Discus
   };
 }
 
+// ---------------------------------------------------------------------------
+// Small loading / error primitives, reused across the sections below.
+// ---------------------------------------------------------------------------
+
+function Skeleton({ className = "" }: { className?: string }) {
+  return <div className={`animate-pulse rounded-md bg-muted ${className}`} />;
+}
+
+function InlineError({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
+      <AlertCircle className="h-5 w-5 text-destructive" />
+      <p className="text-sm text-muted-foreground max-w-xs">{message}</p>
+      {onRetry && (
+        <Button variant="outline" size="sm" onClick={onRetry} className="mt-1">
+          <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Retry
+        </Button>
+      )}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [, setLocation] = useLocation();
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -204,6 +227,12 @@ export default function Dashboard() {
   const [coursesLoading, setCoursesLoading] = useState(true);
   const [coursesError, setCoursesError] = useState<string | null>(null);
   const [students, setStudents] = useState<any[]>([]);
+  const [studentsLoading, setStudentsLoading] = useState(true);
+
+  // Bumping this re-runs the effect below, giving the "Retry" buttons
+  // something to trigger without duplicating the fetch logic.
+  const [refreshKey, setRefreshKey] = useState(0);
+  const retry = () => setRefreshKey((k) => k + 1);
 
   // Create course form state
   const [courseName, setCourseName] = useState("");
@@ -219,6 +248,7 @@ export default function Dashboard() {
     let cancelled = false;
 
     async function fetchStudents() {
+      setStudentsLoading(true);
       try {
         const res = await authFetch("/students");
         if (!res.ok) throw new Error(`Request failed with status ${res.status}`);
@@ -226,6 +256,8 @@ export default function Dashboard() {
         if (!cancelled) setStudents(data.data ?? []);
       } catch (err) {
         console.error("Failed to load students:", err);
+      } finally {
+        if (!cancelled) setStudentsLoading(false);
       }
     }
 
@@ -304,7 +336,7 @@ export default function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshKey]);
 
   const handleCreateCourse = async () => {
     if (!courseName.trim()) return;
@@ -478,6 +510,8 @@ export default function Dashboard() {
     return weekBuckets.map((count, i) => ({ name: `Week ${i + 1}`, uploads: count }));
   }, [resourceRecords]);
 
+  const metricsLoading = coursesLoading || resourcesLoading || studentsLoading;
+
   const metrics = [
     {
       title: "Total Courses",
@@ -526,24 +560,32 @@ export default function Dashboard() {
               <Badge variant="destructive" className="rounded-full text-[10px] h-5 px-2">{openDiscussions.length} new</Badge>
             </div>
             <div className="flex flex-col divide-y max-h-72 overflow-y-auto">
-              {discussions.map(d => (
-                <button
-                  key={d.id}
-                  className="p-3 text-left hover:bg-muted/50 transition-colors w-full"
-                  onClick={() => { setNotifOpen(false); setLocation("/viewer"); }}
-                >
-                  <div className="flex items-center gap-2 mb-1">
-                    <Avatar className="h-6 w-6 shrink-0 border">
-                      <AvatarFallback className="text-[10px] bg-primary/5">{d.user.avatar}</AvatarFallback>
-                    </Avatar>
-                    <span className="font-medium text-xs">{d.user.name}</span>
-                    <Badge variant={d.status === "Open" ? "outline" : "secondary"} className="text-[10px] px-1.5 py-0 ml-auto">
-                      {d.status}
-                    </Badge>
-                  </div>
-                  <p className="text-xs text-muted-foreground line-clamp-2 pl-8">{d.question}</p>
-                </button>
-              ))}
+              {resourcesLoading ? (
+                <div className="p-4 flex items-center justify-center">
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+              ) : discussions.length === 0 ? (
+                <p className="p-4 text-xs text-muted-foreground text-center">No notifications yet.</p>
+              ) : (
+                discussions.map(d => (
+                  <button
+                    key={d.id}
+                    className="p-3 text-left hover:bg-muted/50 transition-colors w-full"
+                    onClick={() => { setNotifOpen(false); setLocation("/viewer"); }}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <Avatar className="h-6 w-6 shrink-0 border">
+                        <AvatarFallback className="text-[10px] bg-primary/5">{d.user.avatar}</AvatarFallback>
+                      </Avatar>
+                      <span className="font-medium text-xs">{d.user.name}</span>
+                      <Badge variant={d.status === "Open" ? "outline" : "secondary"} className="text-[10px] px-1.5 py-0 ml-auto">
+                        {d.status}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground line-clamp-2 pl-8">{d.question}</p>
+                  </button>
+                ))
+              )}
             </div>
             <div className="p-2 border-t">
               <Button variant="ghost" size="sm" className="w-full text-xs text-primary" onClick={() => setNotifOpen(false)}>
@@ -590,26 +632,41 @@ export default function Dashboard() {
 
         {/* Metric Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {metrics.map((metric, i) => (
-            <Card key={i} className="shadow-sm border-muted">
-              <CardContent className="p-6">
-                <div className="flex justify-between items-start">
-                  <div className="flex flex-col gap-1">
-                    <span className="text-sm font-medium text-muted-foreground">{metric.title}</span>
-                    <span className="text-3xl font-bold">{metric.value}</span>
-                  </div>
-                  <div className="p-2 bg-primary/10 rounded-lg text-primary">
-                    <metric.icon className="h-5 w-5" />
-                  </div>
-                </div>
-                <div className="mt-4 flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <TrendingUp className="h-3.5 w-3.5 text-emerald-500" />
-                  <span className="text-emerald-600 font-medium">{metric.trend.split(' ')[0]}</span>
-                  <span>{metric.trend.split(' ').slice(1).join(' ')}</span>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+          {metricsLoading
+            ? Array.from({ length: 4 }).map((_, i) => (
+                <Card key={i} className="shadow-sm border-muted">
+                  <CardContent className="p-6">
+                    <div className="flex justify-between items-start">
+                      <div className="flex flex-col gap-2 flex-1">
+                        <Skeleton className="h-3.5 w-24" />
+                        <Skeleton className="h-8 w-16" />
+                      </div>
+                      <Skeleton className="h-9 w-9 rounded-lg" />
+                    </div>
+                    <Skeleton className="h-3.5 w-32 mt-4" />
+                  </CardContent>
+                </Card>
+              ))
+            : metrics.map((metric, i) => (
+                <Card key={i} className="shadow-sm border-muted">
+                  <CardContent className="p-6">
+                    <div className="flex justify-between items-start">
+                      <div className="flex flex-col gap-1">
+                        <span className="text-sm font-medium text-muted-foreground">{metric.title}</span>
+                        <span className="text-3xl font-bold">{metric.value}</span>
+                      </div>
+                      <div className="p-2 bg-primary/10 rounded-lg text-primary">
+                        <metric.icon className="h-5 w-5" />
+                      </div>
+                    </div>
+                    <div className="mt-4 flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <TrendingUp className="h-3.5 w-3.5 text-emerald-500" />
+                      <span className="text-emerald-600 font-medium">{metric.trend.split(' ')[0]}</span>
+                      <span>{metric.trend.split(' ').slice(1).join(' ')}</span>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
         </div>
 
         {/* Charts Section */}
@@ -626,21 +683,29 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="h-[220px] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={activityChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <defs>
-                      <linearGradient id="colorDiscussions" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
-                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} dy={10} />
-                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
-                    <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', borderRadius: '8px', border: '1px solid hsl(var(--border))' }} itemStyle={{ color: 'hsl(var(--foreground))' }} />
-                    <Area type="monotone" dataKey="discussions" stroke="hsl(var(--primary))" strokeWidth={2} fillOpacity={1} fill="url(#colorDiscussions)" />
-                  </AreaChart>
-                </ResponsiveContainer>
+                {resourcesLoading ? (
+                  <div className="h-full w-full flex items-center justify-center">
+                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                  </div>
+                ) : resourcesError ? (
+                  <InlineError message={resourcesError} onRetry={retry} />
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={activityChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id="colorDiscussions" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
+                          <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
+                      <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} dy={10} />
+                      <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
+                      <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', borderRadius: '8px', border: '1px solid hsl(var(--border))' }} itemStyle={{ color: 'hsl(var(--foreground))' }} />
+                      <Area type="monotone" dataKey="discussions" stroke="hsl(var(--primary))" strokeWidth={2} fillOpacity={1} fill="url(#colorDiscussions)" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -652,16 +717,24 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="h-[220px] w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={engagementChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
-                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} dy={10} />
-                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
-                    <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', borderRadius: '8px', border: '1px solid hsl(var(--border))' }} cursor={{ fill: 'hsl(var(--muted))' }} />
-                    <Bar dataKey="active" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} maxBarSize={40} name="Active" />
-                    <Bar dataKey="total" fill="hsl(var(--primary) / 0.2)" radius={[4, 4, 0, 0]} maxBarSize={40} name="Total" />
-                  </BarChart>
-                </ResponsiveContainer>
+                {coursesLoading || resourcesLoading ? (
+                  <div className="h-full w-full flex items-center justify-center">
+                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                  </div>
+                ) : coursesError ? (
+                  <InlineError message={coursesError} onRetry={retry} />
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={engagementChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
+                      <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} dy={10} />
+                      <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
+                      <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', borderRadius: '8px', border: '1px solid hsl(var(--border))' }} cursor={{ fill: 'hsl(var(--muted))' }} />
+                      <Bar dataKey="active" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} maxBarSize={40} name="Active" />
+                      <Bar dataKey="total" fill="hsl(var(--primary) / 0.2)" radius={[4, 4, 0, 0]} maxBarSize={40} name="Total" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -674,15 +747,23 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent>
             <div className="h-[180px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={uploadsChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
-                  <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', borderRadius: '8px', border: '1px solid hsl(var(--border))' }} itemStyle={{ color: 'hsl(var(--foreground))' }} />
-                  <Line type="monotone" dataKey="uploads" stroke="hsl(var(--primary))" strokeWidth={2.5} dot={{ fill: 'hsl(var(--primary))', r: 4 }} activeDot={{ r: 6 }} name="Uploads" />
-                </LineChart>
-              </ResponsiveContainer>
+              {resourcesLoading ? (
+                <div className="h-full w-full flex items-center justify-center">
+                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                </div>
+              ) : resourcesError ? (
+                <InlineError message={resourcesError} onRetry={retry} />
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={uploadsChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--border))" />
+                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} dy={10} />
+                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
+                    <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', borderRadius: '8px', border: '1px solid hsl(var(--border))' }} itemStyle={{ color: 'hsl(var(--foreground))' }} />
+                    <Line type="monotone" dataKey="uploads" stroke="hsl(var(--primary))" strokeWidth={2.5} dot={{ fill: 'hsl(var(--primary))', r: 4 }} activeDot={{ r: 6 }} name="Uploads" />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -700,52 +781,79 @@ export default function Dashboard() {
               </Button>
             </CardHeader>
             <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow className="border-border">
-                    <TableHead className="w-[200px]">Course</TableHead>
-                    <TableHead className="text-right">Students</TableHead>
-                    <TableHead className="text-right">Resources</TableHead>
-                    <TableHead className="hidden md:table-cell">Status</TableHead>
-                    <TableHead className="text-right">Action</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {courses.map((course: any) => (
-                    <TableRow key={course.id} className="border-border group cursor-pointer hover:bg-muted/30">
-                      <TableCell className="font-medium text-sm">
-                        <div className="flex items-center gap-2">
-                          <div className="w-8 h-8 rounded bg-primary/10 flex items-center justify-center text-primary font-bold text-xs shrink-0">
-                            {course.name.split(' ').map((n: string) => n[0]).join('').substring(0, 2)}
-                          </div>
-                          <span className="truncate max-w-[140px] block">{course.name}</span>
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-right text-muted-foreground">{course.students}</TableCell>
-                      <TableCell className="text-right text-muted-foreground">{course.resources}</TableCell>
-                      <TableCell className="hidden md:table-cell">
-                        <Badge
-                          variant={course.status === "Active" ? "secondary" : "outline"}
-                          className="font-normal text-xs"
-                        >
-                          {course.status}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 text-xs opacity-0 group-hover:opacity-100 transition-opacity text-primary"
-                          onClick={() => setLocation("/viewer")}
-                          data-testid={`button-open-course-${course.id}`}
-                        >
-                          <Eye className="h-3.5 w-3.5 mr-1" /> Open
-                        </Button>
-                      </TableCell>
+              {coursesError ? (
+                <InlineError message={coursesError} onRetry={retry} />
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow className="border-border">
+                      <TableHead className="w-[200px]">Course</TableHead>
+                      <TableHead className="text-right">Students</TableHead>
+                      <TableHead className="text-right">Resources</TableHead>
+                      <TableHead className="hidden md:table-cell">Status</TableHead>
+                      <TableHead className="text-right">Action</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {coursesLoading ? (
+                      Array.from({ length: 4 }).map((_, i) => (
+                        <TableRow key={i} className="border-border">
+                          <TableCell>
+                            <div className="flex items-center gap-2">
+                              <Skeleton className="h-8 w-8 rounded" />
+                              <Skeleton className="h-4 w-28" />
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right"><Skeleton className="h-4 w-8 ml-auto" /></TableCell>
+                          <TableCell className="text-right"><Skeleton className="h-4 w-8 ml-auto" /></TableCell>
+                          <TableCell className="hidden md:table-cell"><Skeleton className="h-5 w-14" /></TableCell>
+                          <TableCell className="text-right"><Skeleton className="h-4 w-10 ml-auto" /></TableCell>
+                        </TableRow>
+                      ))
+                    ) : courses.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={5} className="text-center text-sm text-muted-foreground py-8">
+                          No courses yet. Create one to get started.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      courses.map((course: any) => (
+                        <TableRow key={course.id} className="border-border group cursor-pointer hover:bg-muted/30">
+                          <TableCell className="font-medium text-sm">
+                            <div className="flex items-center gap-2">
+                              <div className="w-8 h-8 rounded bg-primary/10 flex items-center justify-center text-primary font-bold text-xs shrink-0">
+                                {course.name.split(' ').map((n: string) => n[0]).join('').substring(0, 2)}
+                              </div>
+                              <span className="truncate max-w-[140px] block">{course.name}</span>
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right text-muted-foreground">{course.students}</TableCell>
+                          <TableCell className="text-right text-muted-foreground">{course.resources}</TableCell>
+                          <TableCell className="hidden md:table-cell">
+                            <Badge
+                              variant={course.status === "Active" ? "secondary" : "outline"}
+                              className="font-normal text-xs"
+                            >
+                              {course.status}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs opacity-0 group-hover:opacity-100 transition-opacity text-primary"
+                              onClick={() => setLocation("/viewer")}
+                              data-testid={`button-open-course-${course.id}`}
+                            >
+                              <Eye className="h-3.5 w-3.5 mr-1" /> Open
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              )}
             </CardContent>
           </Card>
 
@@ -759,36 +867,56 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1 flex flex-col gap-5">
-              {openDiscussions.map((discussion) => (
-                <div key={discussion.id} className="flex gap-3 group relative">
-                  <Avatar className="h-8 w-8 shrink-0 border z-10 bg-background">
-                    <AvatarFallback className="text-xs bg-primary/5">{discussion.user.avatar}</AvatarFallback>
-                  </Avatar>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2 mb-1">
-                      <span className="font-medium text-sm text-foreground truncate">{discussion.user.name}</span>
-                      <span className="text-xs text-muted-foreground whitespace-nowrap">{discussion.time}</span>
-                    </div>
-                    <div className="bg-muted/40 p-2.5 rounded-md mb-2">
-                      <p className="text-sm text-muted-foreground line-clamp-2">{discussion.question}</p>
-                    </div>
-                    <div className="flex items-center justify-between mt-1">
-                      <span className="text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded">
-                        {discussion.course} &middot; p. {discussion.page}
-                      </span>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 text-xs text-muted-foreground group-hover:text-primary transition-colors"
-                        onClick={() => setLocation("/viewer")}
-                        data-testid={`button-reply-discussion-${discussion.id}`}
-                      >
-                        Reply <ArrowUpRight className="h-3 w-3 ml-1" />
-                      </Button>
+              {resourcesLoading ? (
+                Array.from({ length: 3 }).map((_, i) => (
+                  <div key={i} className="flex gap-3">
+                    <Skeleton className="h-8 w-8 rounded-full shrink-0" />
+                    <div className="flex-1 min-w-0 flex flex-col gap-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <Skeleton className="h-3.5 w-24" />
+                        <Skeleton className="h-3 w-10" />
+                      </div>
+                      <Skeleton className="h-10 w-full" />
+                      <Skeleton className="h-4 w-24" />
                     </div>
                   </div>
-                </div>
-              ))}
+                ))
+              ) : resourcesError ? (
+                <InlineError message={resourcesError} onRetry={retry} />
+              ) : openDiscussions.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-8">No unresolved questions right now.</p>
+              ) : (
+                openDiscussions.map((discussion) => (
+                  <div key={discussion.id} className="flex gap-3 group relative">
+                    <Avatar className="h-8 w-8 shrink-0 border z-10 bg-background">
+                      <AvatarFallback className="text-xs bg-primary/5">{discussion.user.avatar}</AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <span className="font-medium text-sm text-foreground truncate">{discussion.user.name}</span>
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">{discussion.time}</span>
+                      </div>
+                      <div className="bg-muted/40 p-2.5 rounded-md mb-2">
+                        <p className="text-sm text-muted-foreground line-clamp-2">{discussion.question}</p>
+                      </div>
+                      <div className="flex items-center justify-between mt-1">
+                        <span className="text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded">
+                          {discussion.course} &middot; p. {discussion.page}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 text-xs text-muted-foreground group-hover:text-primary transition-colors"
+                          onClick={() => setLocation("/viewer")}
+                          data-testid={`button-reply-discussion-${discussion.id}`}
+                        >
+                          Reply <ArrowUpRight className="h-3 w-3 ml-1" />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
             </CardContent>
           </Card>
         </div>
@@ -806,42 +934,70 @@ export default function Dashboard() {
               <Upload className="h-3.5 w-3.5 mr-2" /> Upload
             </Button>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {resources.slice(0, 4).map((resource) => (
-              <Card
-                key={resource.id}
-                className="shadow-sm border-muted hover:border-primary/40 transition-all cursor-pointer group hover:shadow-md"
-                data-testid={`card-resource-${resource.id}`}
-              >
-                <CardContent className="p-4 flex flex-col gap-3">
-                  <div className="flex items-start justify-between">
-                    <div className="p-2 bg-red-500/10 text-red-500 rounded-md">
-                      <FileText className="h-5 w-5" />
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity"
-                      onClick={() => setLocation("/viewer")}
-                      data-testid={`button-open-resource-${resource.id}`}
-                    >
-                      <ArrowUpRight className="h-4 w-4" />
-                    </Button>
-                  </div>
-                  <div>
-                    <h3 className="font-medium text-sm truncate" title={resource.title}>{resource.title}</h3>
-                    <p className="text-xs text-muted-foreground mt-1 truncate">{resource.course}</p>
-                  </div>
-                  <div className="flex items-center justify-between text-xs mt-2 pt-3 border-t">
-                    <span className="text-muted-foreground">{resource.uploadDate}</span>
-                    <span className="flex items-center gap-1 font-medium text-muted-foreground">
-                      <MessageSquare className="h-3 w-3" /> {resource.discussions}
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
+          {resourcesError ? (
+            <InlineError message={resourcesError} onRetry={retry} />
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {resourcesLoading ? (
+                Array.from({ length: 4 }).map((_, i) => (
+                  <Card key={i} className="shadow-sm border-muted">
+                    <CardContent className="p-4 flex flex-col gap-3">
+                      <div className="flex items-start justify-between">
+                        <Skeleton className="h-9 w-9 rounded-md" />
+                      </div>
+                      <div className="flex flex-col gap-2">
+                        <Skeleton className="h-4 w-3/4" />
+                        <Skeleton className="h-3 w-1/2" />
+                      </div>
+                      <div className="flex items-center justify-between pt-3 border-t">
+                        <Skeleton className="h-3 w-16" />
+                        <Skeleton className="h-3 w-8" />
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))
+              ) : resources.length === 0 ? (
+                <p className="text-sm text-muted-foreground py-8 col-span-full text-center">
+                  No resources uploaded yet.
+                </p>
+              ) : (
+                resources.slice(0, 4).map((resource) => (
+                  <Card
+                    key={resource.id}
+                    className="shadow-sm border-muted hover:border-primary/40 transition-all cursor-pointer group hover:shadow-md"
+                    data-testid={`card-resource-${resource.id}`}
+                  >
+                    <CardContent className="p-4 flex flex-col gap-3">
+                      <div className="flex items-start justify-between">
+                        <div className="p-2 bg-red-500/10 text-red-500 rounded-md">
+                          <FileText className="h-5 w-5" />
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity"
+                          onClick={() => setLocation("/viewer")}
+                          data-testid={`button-open-resource-${resource.id}`}
+                        >
+                          <ArrowUpRight className="h-4 w-4" />
+                        </Button>
+                      </div>
+                      <div>
+                        <h3 className="font-medium text-sm truncate" title={resource.title}>{resource.title}</h3>
+                        <p className="text-xs text-muted-foreground mt-1 truncate">{resource.course}</p>
+                      </div>
+                      <div className="flex items-center justify-between text-xs mt-2 pt-3 border-t">
+                        <span className="text-muted-foreground">{resource.uploadDate}</span>
+                        <span className="flex items-center gap-1 font-medium text-muted-foreground">
+                          <MessageSquare className="h-3 w-3" /> {resource.discussions}
+                        </span>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))
+              )}
+            </div>
+          )}
         </div>
       </main>
 
@@ -872,7 +1028,7 @@ export default function Dashboard() {
               <Label htmlFor="upload-course">Course</Label>
               <Select value={uploadCourse} onValueChange={setUploadCourse}>
                 <SelectTrigger id="upload-course" data-testid="select-upload-course">
-                  <SelectValue placeholder="Select a course" />
+                  <SelectValue placeholder={coursesLoading ? "Loading courses..." : "Select a course"} />
                 </SelectTrigger>
                 <SelectContent>
                   {courses.filter((c: any) => c.status === "Active").map((c: any) => (
@@ -930,7 +1086,13 @@ export default function Dashboard() {
               disabled={!uploadTitle.trim() || !uploadCourse || !selectedFile || isUploading}
               data-testid="button-confirm-upload"
             >
-              {isUploading ? "Uploading..." : "Upload Resource"}
+              {isUploading ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" /> Uploading...
+                </>
+              ) : (
+                "Upload Resource"
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -973,7 +1135,13 @@ export default function Dashboard() {
               disabled={!courseName.trim() || isCreatingCourse}
               data-testid="button-confirm-create-course"
             >
-              {isCreatingCourse ? "Creating..." : "Create Course"}
+              {isCreatingCourse ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" /> Creating...
+                </>
+              ) : (
+                "Create Course"
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

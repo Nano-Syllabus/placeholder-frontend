@@ -1,8 +1,8 @@
 import { type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import { Bell, Sun, Moon, BookOpen, User, Settings, LogOut, Search } from "lucide-react";
+import { Bell, Sun, Moon, BookOpen, User, Settings, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -35,7 +35,7 @@ interface NavBarProps {
 
 export function NavBar({
   centerContent,
-  showSearch = true,
+
   
   hasNotifications = false,
   notifOpen,
