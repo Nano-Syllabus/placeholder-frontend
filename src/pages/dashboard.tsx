@@ -15,7 +15,7 @@ import {
 } from "recharts";
 import {
   BookOpen, Users, FileText, MessageSquare, Plus,
-  ArrowUpRight, CheckCircle2, TrendingUp, Upload, Eye, FileCheck, X,
+  ArrowUpRight, CheckCircle2, TrendingUp, Upload, FileCheck, X,
 } from "lucide-react";
 import {
   MOCK_COURSES,
