@@ -714,7 +714,7 @@ export default function Dashboard() {
                     <TableHead className="text-right">Students</TableHead>
                     <TableHead className="text-right">Resources</TableHead>
                     <TableHead className="hidden md:table-cell">Status</TableHead>
-                    <TableHead className="text-right">Action</TableHead>
+                  
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -738,17 +738,7 @@ export default function Dashboard() {
                           {course.status}
                         </Badge>
                       </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 text-xs opacity-0 group-hover:opacity-100 transition-opacity text-primary"
-                          onClick={() => setLocation("/viewer")}
-                          data-testid={`button-open-course-${course.id}`}
-                        >
-                          <Eye className="h-3.5 w-3.5 mr-1" /> Open
-                        </Button>
-                      </TableCell>
+                     
                     </TableRow>
                   ))}
                 </TableBody>
@@ -787,7 +777,7 @@ export default function Dashboard() {
                         variant="ghost"
                         size="sm"
                         className="h-6 text-xs text-muted-foreground group-hover:text-primary transition-colors"
-                        onClick={() => setLocation("/viewer")}
+                        onClick={() => setLocation(`/viewer/${discussion.resourceId}`)}
                         data-testid={`button-reply-discussion-${discussion.id}`}
                       >
                         Reply <ArrowUpRight className="h-3 w-3 ml-1" />
