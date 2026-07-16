@@ -199,10 +199,7 @@ export default function Dashboard() {
 
   const [courses, setCourses] = useState<typeof MOCK_COURSES>([]);
   const [resources, setResources] = useState<ResourceView[]>([]);
-  const [resourcesLoading, setResourcesLoading] = useState(true);
-  const [resourcesError, setResourcesError] = useState<string | null>(null);
-  const [coursesLoading, setCoursesLoading] = useState(true);
-  const [coursesError, setCoursesError] = useState<string | null>(null);
+
   const [students, setStudents] = useState<any[]>([]);
 
   // Create course form state
@@ -218,8 +215,7 @@ export default function Dashboard() {
   // Re-fetch just resources+discussions after a successful upload, so the
   // Dashboard reflects the new resource without a full page reload.
   const fetchResourcesAndDiscussions = async () => {
-    setResourcesLoading(true);
-    setResourcesError(null);
+  
     try {
       const res = await authFetch("/courses/resources/all", { method: "GET" });
       if (!res.ok) {
@@ -255,10 +251,8 @@ export default function Dashboard() {
       setDiscussions(allDiscussions);
     } catch (err) {
       console.error("Failed to load resources/discussions:", err);
-      setResourcesError(err instanceof Error ? err.message : "Failed to load resources");
-    } finally {
-      setResourcesLoading(false);
-    }
+    
+    } 
   };
 
   useEffect(() => {
@@ -276,20 +270,16 @@ export default function Dashboard() {
     }
 
     async function fetchCourses() {
-      setCoursesLoading(true);
-      setCoursesError(null);
+   ;
+ 
       try {
         const res = await authFetch("/courses");
         const data = await res.json();
         if (!res.ok) throw new Error(data.message ?? "Failed to load courses");
         if (!cancelled) setCourses(data.body.courses);
       } catch (err) {
-        if (!cancelled) {
-          setCoursesError(err instanceof Error ? err.message : "Something went wrong.");
-        }
-      } finally {
-        if (!cancelled) setCoursesLoading(false);
-      }
+       console.log(err)
+      } 
     }
 
     fetchStudents();

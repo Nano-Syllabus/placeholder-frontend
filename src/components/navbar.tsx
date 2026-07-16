@@ -6,7 +6,7 @@ import { useAuth } from "@/lib/auth-context";
 
 export function Navbar() {
   const { theme, setTheme } = useTheme();
-  const [location] = useLocation();
+ 
   const [, setLocation] = useLocation();
 
   const { user, logout } = useAuth();

@@ -6,7 +6,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { AuthProvider, useAuth } from "@/lib/auth-context";
 import NotFound from "@/pages/not-found";
 import Home from "@/pages/home";
-import Viewer from "@/pages/viewer";
+
 import Dashboard from "@/pages/dashboard";
 import Login from "@/pages/login";
 import DiscoverPage from "./pages/discover";
