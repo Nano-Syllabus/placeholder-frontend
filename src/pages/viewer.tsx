@@ -29,69 +29,22 @@ const ZOOM_LEVELS = [50, 75, 100, 125, 150, 200];
 const BASE_PAGE_WIDTH = 760;
 
 // ---------------------------------------------------------------------------
-// Resource types
+// Props — a single PDF resource, rather than a fetched list of resources.
+// The caller (route/page) is responsible for knowing which resource this is
+// (e.g. from a route param) and passing its identity + file down.
 // ---------------------------------------------------------------------------
 
-interface ResourceRecord {
-  _id: string;
-  title: string;
-  course: { _id: string; title: string } | string;
-  uploadedBy: { _id: string; user_name: string; profile_pic?: string } | string;
+export interface ViewerProps {
+  /** Resource id — used to scope the discussions API and as document identity. */
+  resourceId: string;
+  /** Direct URL (or path) to the PDF file to render. */
   fileUrl: string;
-  fileSize: number;
-  pages?: number;
-  createdAt?: string;
-}
-
-interface ResourceView {
-  id: string;
+  /** Display title, shown in the breadcrumb and used as the download filename. */
   title: string;
-  course: string;
-  uploadDate: string;
+  /** Optional course label for the breadcrumb. */
+  course?: string;
+  /** Optional known page count, used for the "Page X of Y" label before the PDF finishes loading. */
   pages?: number;
-  file: string;
-}
-
-function toResourceView(record: ResourceRecord): ResourceView {
-  let courseTitle = "Untitled course";
-  if (typeof record.course === "string") {
-    courseTitle = record.course;
-  } else if (record.course && typeof record.course === "object" && "title" in record.course) {
-    courseTitle = (record.course as { title?: string }).title || "Untitled course";
-  }
-
-  const uploadDate = record.createdAt
-    ? new Date(record.createdAt).toLocaleDateString(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-      })
-    : "Unknown date";
-
-  return {
-    id: record._id,
-    title: record.title ?? "Untitled",
-    course: courseTitle,
-    uploadDate,
-    pages: record.pages,
-    file: record.fileUrl,
-  };
-}
-
-function extractResourceArray(payload: unknown): ResourceRecord[] {
-  if (Array.isArray(payload)) return payload as ResourceRecord[];
-
-  if (payload && typeof payload === "object") {
-    const obj = payload as Record<string, unknown>;
-    if (Array.isArray(obj.data)) return obj.data as ResourceRecord[];
-    if (obj.data && typeof obj.data === "object") {
-      const inner = obj.data as Record<string, unknown>;
-      if (Array.isArray(inner.resources)) return inner.resources as ResourceRecord[];
-    }
-    if (Array.isArray(obj.resources)) return obj.resources as ResourceRecord[];
-  }
-
-  throw new Error("Unrecognized response shape for resources");
 }
 
 // ---------------------------------------------------------------------------
@@ -186,12 +139,7 @@ function extractDiscussionArray(payload: unknown): DiscussionRecord[] {
   return [];
 }
 
-export default function Viewer() {
-  const [resources, setResources] = useState<ResourceView[]>([]);
-  const [resourcesLoading, setResourcesLoading] = useState<boolean>(true);
-  const [resourcesError, setResourcesError] = useState<string | null>(null);
-
-  const [activeDocument, setActiveDocument] = useState<string>("");
+export default function Viewer({ resourceId, fileUrl, title, course, pages }: ViewerProps) {
   const [expandedThread, setExpandedThread] = useState<string | null>(null);
   const [replyTexts, setReplyTexts] = useState<Record<string, string>>({});
 
@@ -220,51 +168,22 @@ export default function Viewer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const docAreaRef = useRef<HTMLDivElement>(null);
 
-  // GET /api/courses/resources/all
+  // Reset viewer state whenever the resource identity changes (e.g. the
+  // caller navigates to a different PDF and re-renders this component with
+  // new props).
   useEffect(() => {
-    let cancelled = false;
+    setCurrentPage(1);
+    setNumPages(null);
+    setPdfLoading(true);
+    setExpandedThread(null);
+    setPlacingPin(false);
+    setPageFilter("all");
+  }, [resourceId, fileUrl]);
 
-    const getResources = async () => {
-      setResourcesLoading(true);
-      setResourcesError(null);
-
-      try {
-        const res = await authFetch("/courses/resources/all", { method: "GET" });
-
-        if (!res.ok) {
-          const body = await res.json().catch(() => null);
-          
-          throw new Error(body?.message ?? `Request failed with status ${res.status}`);
-        }
-        
-        const payload = await res.json();
-        
-        const records = extractResourceArray(payload);
-        const mapped = records.map(toResourceView);
-
-        if (cancelled) return;
-        setResources(mapped);
-        if (mapped.length > 0) setActiveDocument(mapped[0].id);
-      } catch (err) {
-        if (cancelled) return;
-        console.error("Failed to load resources:", err);
-        setResourcesError(err instanceof Error ? err.message : "Failed to load resources");
-      } finally {
-        if (!cancelled) setResourcesLoading(false);
-      }
-    };
-
-    getResources();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // GET /api/discussions?resource=<activeDocument> — refetch whenever the
-  // open resource changes.
+  // GET /api/discussions?resource=<resourceId> — refetch whenever the
+  // resource changes.
   useEffect(() => {
-    if (!activeDocument) {
+    if (!resourceId) {
       setDiscussions([]);
       return;
     }
@@ -276,7 +195,7 @@ export default function Viewer() {
       setDiscussionsError(null);
 
       try {
-        const res = await authFetch(`/discussions?resource=${activeDocument}`, { method: "GET" });
+        const res = await authFetch(`/discussions?resource=${resourceId}`, { method: "GET" });
 
         if (!res.ok) {
           const body = await res.json().catch(() => null);
@@ -285,8 +204,7 @@ export default function Viewer() {
 
         const payload = await res.json();
         const records = extractDiscussionArray(payload);
-        const courseTitle = resources.find(r => r.id === activeDocument)?.course ?? "";
-        const mapped = records.map(r => toDiscussionView(r, courseTitle));
+        const mapped = records.map(r => toDiscussionView(r, course ?? ""));
 
         if (cancelled) return;
         setDiscussions(mapped);
@@ -305,15 +223,13 @@ export default function Viewer() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDocument]);
+  }, [resourceId, course]);
 
-  const selectedFile = resources.find(r => r.id === activeDocument);
-  const totalPages = numPages ?? selectedFile?.pages ?? 1;
+  const totalPages = numPages ?? pages ?? 1;
   const zoomLevel = ZOOM_LEVELS[zoomIndex];
   const pageWidth = (zoomLevel / 100) * BASE_PAGE_WIDTH;
 
-  // discussions is already scoped to activeDocument by the API query param
+  // discussions is already scoped to resourceId by the API query param
   const resourceDiscussions = discussions;
 
   const sidebarDiscussions =
@@ -343,16 +259,6 @@ export default function Viewer() {
     setPdfLoading(false);
   };
 
-  const switchDocument = (id: string) => {
-    setActiveDocument(id);
-    setCurrentPage(1);
-    setNumPages(null);
-    setPdfLoading(true);
-    setExpandedThread(null);
-    setPlacingPin(false);
-    setPageFilter("all");
-  };
-
   const goToPage = (delta: number) => {
     setCurrentPage(p => Math.max(1, Math.min(totalPages, p + delta)));
     setExpandedThread(null);
@@ -365,10 +271,9 @@ export default function Viewer() {
   };
 
   const handleDownload = () => {
-    if (!selectedFile) return;
     const a = document.createElement("a");
-    a.href = selectedFile.file;
-    a.download = selectedFile.title;
+    a.href = fileUrl;
+    a.download = title;
     a.click();
     setDownloadToast(true);
     setTimeout(() => setDownloadToast(false), 3000);
@@ -396,7 +301,7 @@ export default function Viewer() {
 
   // POST /api/discussions
   const submitDiscussion = async () => {
-    if (!newQuestion.trim() || !selectedFile) return;
+    if (!newQuestion.trim()) return;
 
     setSubmittingDiscussion(true);
     setDiscussionSubmitError(null);
@@ -406,7 +311,7 @@ export default function Viewer() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          resource: activeDocument,
+          resource: resourceId,
           question: newQuestion.trim(),
           page: currentPage,
           position: pendingPosition ?? undefined,
@@ -419,7 +324,7 @@ export default function Viewer() {
       }
 
       const payload = await res.json();
-      const created = toDiscussionView(payload.data, selectedFile.course);
+      const created = toDiscussionView(payload.data, course ?? "");
 
       setDiscussions(prev => [created, ...prev]);
       setNewQuestion("");
@@ -497,49 +402,25 @@ export default function Viewer() {
 
   const openCount = resourceDiscussions.filter(d => d.status === "Open").length;
 
-  if (resourcesLoading) {
-    return (
-      <div className="h-screen flex flex-col items-center justify-center gap-3 text-muted-foreground bg-background">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
-        <span className="text-sm">Loading resources...</span>
-      </div>
-    );
-  }
-
-  if (resourcesError) {
-    return (
-      <div className="h-screen flex flex-col items-center justify-center gap-3 text-muted-foreground bg-background px-4 text-center">
-        <AlertTriangle className="h-8 w-8 text-destructive" />
-        <span className="text-sm">{resourcesError}</span>
-      </div>
-    );
-  }
-
-  if (!selectedFile) {
-    return (
-      <div className="h-screen flex flex-col items-center justify-center gap-3 text-muted-foreground bg-background px-4 text-center">
-        <FileText className="h-8 w-8 opacity-40" />
-        <span className="text-sm">No resources have been uploaded yet.</span>
-      </div>
-    );
-  }
-
   return (
     <div ref={containerRef} className="h-screen flex flex-col bg-background overflow-hidden">
       <NavBar
-        
         hasNotifications={openCount > 0}
         notifOpen={notifOpen}
         onNotifOpenChange={setNotifOpen}
         avatarInitials="ST"
         centerContent={
           <div className="hidden md:flex items-center gap-2 text-sm text-muted-foreground min-w-0">
-            <span className="text-muted-foreground">/</span>
-            <span>Course</span>
-            <ChevronRight className="h-4 w-4" />
-            <span className="text-foreground font-medium">{selectedFile.course}</span>
-            <ChevronRight className="h-4 w-4" />
-            <span className="text-foreground font-medium truncate max-w-[180px]">{selectedFile.title}</span>
+            {course && (
+              <>
+                <span className="text-muted-foreground">/</span>
+                <span>Course</span>
+                <ChevronRight className="h-4 w-4" />
+                <span className="text-foreground font-medium">{course}</span>
+                <ChevronRight className="h-4 w-4" />
+              </>
+            )}
+            <span className="text-foreground font-medium truncate max-w-[220px]">{title}</span>
           </div>
         }
         notificationContent={
@@ -566,34 +447,6 @@ export default function Viewer() {
       />
 
       <div className="flex-1 flex overflow-hidden">
-        {/* Left sidebar: resources */}
-        <aside className="hidden md:flex w-60 flex-col border-r bg-card/50">
-          <div className="p-4 border-b">
-            <h2 className="font-semibold text-sm">Course Resources</h2>
-          </div>
-          <ScrollArea className="flex-1">
-            <div className="p-2 flex flex-col gap-0.5">
-              {resources.map((resource) => (
-                <button
-                  key={resource.id}
-                  onClick={() => switchDocument(resource.id)}
-                  className={`w-full text-left px-3 py-2.5 rounded-md flex items-start gap-3 transition-colors ${
-                    activeDocument === resource.id
-                      ? "bg-primary/10 text-primary font-medium"
-                      : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-                  }`}
-                >
-                  <FileText className={`h-4 w-4 shrink-0 mt-0.5 ${activeDocument === resource.id ? "text-primary" : "text-muted-foreground"}`} />
-                  <div className="flex flex-col flex-1 truncate gap-0.5">
-                    <span className="truncate text-xs leading-relaxed">{resource.title}</span>
-                    <span className="text-[10px] text-muted-foreground">{resource.uploadDate}</span>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </ScrollArea>
-        </aside>
-
         {/* Center: PDF viewer */}
         <main className="flex-1 flex flex-col relative bg-muted/20 overflow-hidden">
           <div className="flex-none h-12 flex items-center justify-between px-4 border-b bg-background/80 backdrop-blur-sm z-10">
@@ -616,17 +469,17 @@ export default function Viewer() {
               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setZoomIndex(i => Math.min(ZOOM_LEVELS.length - 1, i + 1))} disabled={zoomIndex === ZOOM_LEVELS.length - 1}>
                 <ZoomIn className="h-4 w-4" />
               </Button>
-            <div className="flex items-center gap-2 px-2">
-  {showPins ? <Eye className="h-3.5 w-3.5 text-muted-foreground" /> : <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />}
-  <Label htmlFor="show-pins-toggle" className="text-xs text-muted-foreground cursor-pointer select-none">
-    Pins
-  </Label>
-  <Switch
-    id="show-pins-toggle"
-    checked={showPins}
-    onCheckedChange={setShowPins}
-  />
-</div>
+              <div className="flex items-center gap-2 px-2">
+                {showPins ? <Eye className="h-3.5 w-3.5 text-muted-foreground" /> : <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />}
+                <Label htmlFor="show-pins-toggle" className="text-xs text-muted-foreground cursor-pointer select-none">
+                  Pins
+                </Label>
+                <Switch
+                  id="show-pins-toggle"
+                  checked={showPins}
+                  onCheckedChange={setShowPins}
+                />
+              </div>
             </div>
             <div className="flex items-center gap-1">
               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleDownload}>
@@ -673,7 +526,7 @@ export default function Viewer() {
                 </div>
               )}
               <Document
-                file={selectedFile.file}
+                file={fileUrl}
                 onLoadSuccess={handleDocumentLoadSuccess}
                 onLoadError={() => setPdfLoading(false)}
                 className="shadow-2xl rounded-sm overflow-hidden"
@@ -763,7 +616,7 @@ export default function Viewer() {
                 className="absolute bottom-24 right-6 bg-card border shadow-lg rounded-lg px-4 py-3 flex items-center gap-3 text-sm font-medium"
               >
                 <Download className="h-4 w-4 text-primary" />
-                Downloading {selectedFile.title}...
+                Downloading {title}...
                 <button onClick={() => setDownloadToast(false)} className="ml-1 text-muted-foreground hover:text-foreground">
                   <X className="h-4 w-4" />
                 </button>
@@ -914,7 +767,7 @@ export default function Viewer() {
           <div className="flex flex-col gap-4 py-2">
             <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-md text-xs text-muted-foreground">
               <FileText className="h-3.5 w-3.5 shrink-0" />
-              <span className="truncate">{selectedFile.title}</span>
+              <span className="truncate">{title}</span>
               <span className="shrink-0">· p. {currentPage}</span>
             </div>
             <div className="flex flex-col gap-1.5">

@@ -9,9 +9,11 @@ import Home from "@/pages/home";
 import Viewer from "@/pages/viewer";
 import Dashboard from "@/pages/dashboard";
 import Login from "@/pages/login";
+import DiscoverPage from "./pages/discover";
 import Profile from "@/pages/profile";
 import { useEffect } from "react";
 import { Loader2 } from "lucide-react";
+import ViewerPage from "./pages/viewerPage";
 
 const queryClient = new QueryClient();
 
@@ -67,14 +69,17 @@ function Router() {
       <Route path="/">
        <Home />
       </Route>
-      <Route path="/viewer">
-        <RequireAuth><Viewer /></RequireAuth>
-      </Route>
+      <Route path="/viewer/:resourceId">
+  <RequireAuth><ViewerPage /></RequireAuth>
+</Route>
       <Route path="/dashboard">
         <RequireAuth teacherOnly><Dashboard /></RequireAuth>
       </Route>
-      <Route path="/profile">
-        <RequireAuth><Profile /></RequireAuth>
+     <Route path="/profile/:id?">
+  <RequireAuth><Profile /></RequireAuth>
+</Route>
+      <Route path={"/discover"}>
+        <RequireAuth><DiscoverPage/></RequireAuth>
       </Route>
       <Route component={NotFound} />
     </Switch>

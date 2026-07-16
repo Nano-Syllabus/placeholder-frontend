@@ -52,7 +52,7 @@ export default function Login() {
   const [regLoading, setRegLoading] = useState(false);
 
   const redirectAfterAuth = (role: Role) =>
-    navigate(role === "teacher" ? "/dashboard" : "/viewer");
+    navigate(role === "teacher" ? "/dashboard" : "/discover");
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

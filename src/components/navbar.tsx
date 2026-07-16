@@ -3,13 +3,26 @@ import { Moon, Sun, BookOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/components/theme-provider";
 import { useAuth } from "@/lib/auth-context";
-import { navigate } from "wouter/use-browser-location";
 
 export function Navbar() {
   const { theme, setTheme } = useTheme();
   const [location] = useLocation();
-   const { user } = useAuth();
+  const [, setLocation] = useLocation();
 
+  const { user, logout } = useAuth();
+
+  const handleLogout = () => {
+    logout();
+    setLocation("/login");
+  };
+
+  const handleAuthButtonClick = () => {
+    if (user) {
+      handleLogout();
+    } else {
+      setLocation("/login");
+    }
+  };
 
   return (
     <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -19,7 +32,7 @@ export function Navbar() {
             <BookOpen className="h-6 w-6 text-primary" />
             <span className="font-bold inline-block text-lg">CollabLearn</span>
           </Link>
-          <nav className="hidden md:flex gap-6">
+          {/* <nav className="hidden md:flex gap-6">
             <Link 
               href="/viewer" 
               className={`text-sm font-medium transition-colors hover:text-primary ${location === '/viewer' ? 'text-primary' : 'text-muted-foreground'}`}
@@ -32,7 +45,7 @@ export function Navbar() {
             >
               Teacher Dashboard
             </Link>
-          </nav>
+          </nav> */}
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -45,12 +58,12 @@ export function Navbar() {
             <span className="sr-only">Toggle theme</span>
           </Button>
 
-           <Button
+          <Button
             variant="ghost"
-            className=" cursor-pointer"
-            onClick={() => navigate("/login")}
+            className="cursor-pointer"
+            onClick={handleAuthButtonClick}
           >
-           {user ? "Log Out" : "Log in"}
+            {user ? "Log Out" : "Log in"}
           </Button>
           <div className="md:hidden">
             {/* Mobile menu could go here */}

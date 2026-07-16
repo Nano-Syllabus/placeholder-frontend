@@ -4,8 +4,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { FileText, MessageSquare, LayoutDashboard, Shield, Users, ArrowRight, BookOpen } from "lucide-react";
 import { Link } from "wouter";
 import { motion } from "framer-motion";
-
+import { useAuth } from "@/lib/auth-context";
 export default function Home() {
+  const {user} = useAuth();
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <Navbar />
@@ -31,7 +32,7 @@ export default function Home() {
                 Teachers upload course materials. Students collaborate, annotate, and discuss directly inside PDFs via threaded conversations. The modern way to learn.
               </p>
               <div className="flex flex-wrap gap-4 pt-4">
-                <Link href="/viewer" className="inline-flex items-center justify-center whitespace-nowrap rounded-md font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-11 px-8 text-base shadow-sm">
+                <Link href={user?.role == "student" ? "/discover" : "dashboard"} className="inline-flex items-center justify-center whitespace-nowrap rounded-md font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-11 px-8 text-base shadow-sm">
                   Get Started <ArrowRight className="ml-2 h-4 w-4" />
                 </Link>
                 <Link href="/dashboard" className="inline-flex items-center justify-center whitespace-nowrap rounded-md font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-11 px-8 text-base shadow-sm">
