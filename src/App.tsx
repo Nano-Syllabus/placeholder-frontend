@@ -24,7 +24,7 @@ function RequireAuth({ children, teacherOnly = false }: { children: React.ReactN
   useEffect(() => {
     if (isLoading) return;
     if (!user) { navigate("/login"); return; }
-    if (teacherOnly && user.role !== "teacher") { navigate("/viewer"); }
+   
   }, [user, isLoading, teacherOnly, navigate]);
 
   if (isLoading) {
