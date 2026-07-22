@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -14,7 +14,7 @@ import {
   AreaChart, Area, LineChart, Line
 } from "recharts";
 import {
-  BookOpen, Users, FileText, MessageSquare, Plus,
+  BookOpen, Users, FileText, Plus,
    CheckCircle2, TrendingUp, Upload, FileCheck, X, HelpCircle,
 } from "lucide-react";
 import {
@@ -96,19 +96,7 @@ function extractResourceArray(payload: unknown): ResourceRecord[] {
 
 
 
-function formatRelativeTime(dateString?: string): string {
-  if (!dateString) return "";
-  const date = new Date(dateString);
-  const diffMs = Date.now() - date.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return "Just now";
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.floor(diffHr / 24);
-  if (diffDay < 7) return `${diffDay}d ago`;
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
+
 
 // ---------------------------------------------------------------------------
 // Questions — teachers post questions for their courses, students answer them
@@ -398,8 +386,7 @@ export default function Dashboard() {
   };
 
   const openQuestions = useMemo(() => questions.filter(q => q.answers.length === 0), [questions]);
-  const answeredQuestions = useMemo(() => questions.filter(q => q.answers.length > 0), [questions]);
-
+ 
   // ---------------------------------------------------------------------
   // Derived stats from questions
   // ---------------------------------------------------------------------
@@ -693,147 +680,54 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
-        {/* Courses Table + Open Questions */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <Card className="lg:col-span-2 shadow-sm border-muted">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <div className="space-y-1">
-                <CardTitle className="text-base font-semibold">Recent Courses</CardTitle>
-                <CardDescription>Your active teaching environments</CardDescription>
-              </div>
-              <Button variant="ghost" size="sm" className="text-primary h-8" data-testid="button-view-all-courses">
-                View All
-              </Button>
-            </CardHeader>
-            <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow className="border-border">
-                    <TableHead className="w-[200px]">Course</TableHead>
-                    <TableHead className="text-right">Students</TableHead>
-                    <TableHead className="text-right">Resources</TableHead>
-                    <TableHead className="hidden md:table-cell">Status</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {courses.map((course: any) => (
-                    <TableRow key={course.id} className="border-border group cursor-pointer hover:bg-muted/30">
-                      <TableCell className="font-medium text-sm">
-                        <div className="flex items-center gap-2">
-                          <div className="w-8 h-8 rounded bg-primary/10 flex items-center justify-center text-primary font-bold text-xs shrink-0">
-                            {course.name.split(' ').map((n: string) => n[0]).join('').substring(0, 2)}
-                          </div>
-                          <span className="truncate max-w-[140px] block">{course.name}</span>
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-right text-muted-foreground">{course.students}</TableCell>
-                      <TableCell className="text-right text-muted-foreground">{course.resources}</TableCell>
-                      <TableCell className="hidden md:table-cell">
-                        <Badge
-                          variant={course.status === "Active" ? "secondary" : "outline"}
-                          className="font-normal text-xs"
-                        >
-                          {course.status}
-                        </Badge>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
-
-          <Card className="shadow-sm border-muted flex flex-col">
-            <CardHeader className="pb-4">
-              <CardTitle className="text-base font-semibold flex justify-between items-center">
-                Open Questions
-                <Badge variant="destructive" className="ml-2 font-normal rounded-full text-[10px]">
-                  {openQuestions.length} New
-                </Badge>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="flex-1 flex flex-col gap-5">
-              {openQuestions.length === 0 && (
-                <p className="text-sm text-muted-foreground">All questions have been answered. Post a new one to keep students engaged.</p>
-              )}
-              {openQuestions.map((q) => (
-                <div key={q.id} className="flex gap-3 group relative">
-                  <Avatar className="h-8 w-8 shrink-0 border z-10 bg-background">
-                    <AvatarFallback className="text-xs bg-primary/5">
-                      <HelpCircle className="h-3.5 w-3.5 text-primary" />
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2 mb-1">
-                      <span className="font-medium text-sm text-foreground truncate">{q.course}</span>
-                      <span className="text-xs text-muted-foreground whitespace-nowrap">{formatRelativeTime(q.createdAt)}</span>
-                    </div>
-                    <div className="bg-muted/40 p-2.5 rounded-md mb-2">
-                      <p className="text-sm text-muted-foreground line-clamp-2">{q.question}</p>
-                    </div>
-                    <div className="flex items-center justify-between mt-1">
-                      <span className="text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded">
-                        Awaiting student answers
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Answered Questions */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold">Answered Questions</h2>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setPostQuestionOpen(true)}
-              data-testid="button-post-question-secondary"
-            >
-              <HelpCircle className="h-3.5 w-3.5 mr-2" /> Post Question
+        {/* Recent Courses */}
+        <Card className="shadow-sm border-muted">
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <div className="space-y-1">
+              <CardTitle className="text-base font-semibold">Recent Courses</CardTitle>
+              <CardDescription>Your active teaching environments</CardDescription>
+            </div>
+            <Button variant="ghost" size="sm" className="text-primary h-8" data-testid="button-view-all-courses">
+              View All
             </Button>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {answeredQuestions.slice(0, 4).map((q) => (
-              <Card
-                key={q.id}
-                className="shadow-sm border-muted hover:border-primary/40 transition-all cursor-pointer group hover:shadow-md"
-                data-testid={`card-question-${q.id}`}
-              >
-                <CardContent className="p-4 flex flex-col gap-3">
-                  <div className="flex items-start justify-between">
-                    <div className="p-2 bg-primary/10 text-primary rounded-md">
-                      <HelpCircle className="h-5 w-5" />
-                    </div>
-                    <div className="flex -space-x-2">
-                      {q.answers.slice(0, 3).map(a => (
-                        <Avatar key={a.id} className="h-6 w-6 border-2 border-background">
-                          <AvatarFallback className="text-[10px] bg-primary/10">{a.student.avatar}</AvatarFallback>
-                        </Avatar>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <h3 className="font-medium text-sm line-clamp-2" title={q.question}>{q.question}</h3>
-                    <p className="text-xs text-muted-foreground mt-1 truncate">{q.course}</p>
-                  </div>
-                  <div className="flex items-center justify-between text-xs mt-2 pt-3 border-t">
-                    <span className="text-muted-foreground">{formatRelativeTime(q.createdAt)}</span>
-                    <span className="flex items-center gap-1 font-medium text-muted-foreground">
-                      <MessageSquare className="h-3 w-3" /> {q.answers.length}
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-            {answeredQuestions.length === 0 && (
-              <p className="text-sm text-muted-foreground col-span-full">No answers yet — check back once students respond.</p>
-            )}
-          </div>
-        </div>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow className="border-border">
+                  <TableHead className="w-[200px]">Course</TableHead>
+                  <TableHead className="text-right">Students</TableHead>
+                  <TableHead className="text-right">Resources</TableHead>
+                  <TableHead className="hidden md:table-cell">Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {courses.map((course: any) => (
+                  <TableRow key={course.id} className="border-border group cursor-pointer hover:bg-muted/30">
+                    <TableCell className="font-medium text-sm">
+                      <div className="flex items-center gap-2">
+                        <div className="w-8 h-8 rounded bg-primary/10 flex items-center justify-center text-primary font-bold text-xs shrink-0">
+                          {course.name.split(' ').map((n: string) => n[0]).join('').substring(0, 2)}
+                        </div>
+                        <span className="truncate max-w-[140px] block">{course.name}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right text-muted-foreground">{course.students}</TableCell>
+                    <TableCell className="text-right text-muted-foreground">{course.resources}</TableCell>
+                    <TableCell className="hidden md:table-cell">
+                      <Badge
+                        variant={course.status === "Active" ? "secondary" : "outline"}
+                        className="font-normal text-xs"
+                      >
+                        {course.status}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
       </main>
 
       {/* Upload Resource Dialog */}
