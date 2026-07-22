@@ -12,8 +12,7 @@ import {
   LayoutGrid,
   List as ListIcon,
   ClipboardList,
-  Timer,
-  CalendarDays,
+  
   ArrowRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -110,9 +109,6 @@ function courseName(course: TeacherQuestion["course"]) {
   return typeof course === "string" ? course : course.name;
 }
 
-function isPastDue(date: string) {
-  return new Date(date).getTime() < Date.now();
-}
 
 // Small debounce hook so search doesn't refilter on every keystroke.
 function useDebouncedValue<T>(value: T, delayMs: number) {
