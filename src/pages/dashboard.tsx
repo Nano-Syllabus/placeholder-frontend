@@ -15,12 +15,11 @@ import {
 } from "recharts";
 import {
   BookOpen, Users, FileText, MessageSquare, Plus,
-  ArrowUpRight, CheckCircle2, TrendingUp, Upload, FileCheck, X,
+  ArrowUpRight, CheckCircle2, TrendingUp, Upload, FileCheck, X, HelpCircle,
 } from "lucide-react";
 import {
   MOCK_COURSES,
-  CHART_ACTIVITY_DATA, CHART_UPLOADS_DATA, CHART_ENGAGEMENT_DATA,
-  type Discussion
+  CHART_UPLOADS_DATA,
 } from "@/lib/mock-data";
 import { useLocation } from "wouter";
 import { authFetch } from "@/lib/auth-context";
@@ -67,7 +66,7 @@ function courseIdFromResource(record: { course: ResourceRecord["course"] }): str
   return undefined;
 }
 
-function toResourceView(record: ResourceRecord, discussionCount: number): ResourceView {
+function toResourceView(record: ResourceRecord, questionCount: number): ResourceView {
   const uploadDate = record.createdAt
     ? new Date(record.createdAt).toLocaleDateString(undefined, {
         year: "numeric",
@@ -81,7 +80,7 @@ function toResourceView(record: ResourceRecord, discussionCount: number): Resour
     title: record.title ?? "Untitled",
     course: courseTitleFromResource(record),
     uploadDate,
-    discussions: discussionCount,
+    discussions: questionCount,
     file: record.fileUrl,
   };
 }
@@ -100,51 +99,11 @@ function extractResourceArray(payload: unknown): ResourceRecord[] {
   return [];
 }
 
-// ---------------------------------------------------------------------------
-// Discussion types — same shape as GET /api/discussions?resource=<id> in
-// Viewer.tsx.
-// ---------------------------------------------------------------------------
-
-interface DiscussionUserRecord {
-  _id: string;
-  user_name: string;
-  profile_pic?: string;
-}
-
-interface ReplyRecord {
-  user: DiscussionUserRecord | string;
-  message: string;
-  createdAt?: string;
-}
-
-interface DiscussionRecord {
-  _id: string;
-  resource: string;
-  user: DiscussionUserRecord | string;
-  question: string;
-  page: number;
-  status: "Open" | "Resolved";
-  replies: ReplyRecord[];
-  createdAt?: string;
-}
-
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "?";
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[1][0]).toUpperCase();
-}
-
-function toDiscussionUser(user: DiscussionUserRecord | string | undefined): { name: string; avatar: string } {
-  if (user && typeof user === "object" && "user_name" in user) {
-    return { name: user.user_name, avatar: getInitials(user.user_name) };
-  }
-  return { name: "Unknown user", avatar: "?" };
-}
-
-function extractUserId(user: DiscussionUserRecord | string | undefined): string | undefined {
-  if (!user) return undefined;
-  return typeof user === "string" ? user : user._id;
 }
 
 function formatRelativeTime(dateString?: string): string {
@@ -161,33 +120,98 @@ function formatRelativeTime(dateString?: string): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function toDiscussionView(record: DiscussionRecord, courseTitle: string): Discussion {
-  return {
-    id: record._id,
-    resourceId: record.resource,
-    user: toDiscussionUser(record.user),
-    course: courseTitle,
-    question: record.question,
-    page: record.page,
-    time: formatRelativeTime(record.createdAt),
-    status: record.status,
-    replies: [],
-    position: undefined,
-  };
+// ---------------------------------------------------------------------------
+// Questions — teachers post questions for their courses, students answer them
+// on the Discover page. For now these are static/local: posting a question
+// just appends to local state, it is not persisted to a backend.
+// ---------------------------------------------------------------------------
+
+interface QuestionAnswer {
+  id: string;
+  student: { name: string; avatar: string };
+  answer: string;
+  createdAt: string;
 }
+
+interface QuestionItem {
+  id: string;
+  question: string;
+  course: string;
+  createdAt: string;
+  answers: QuestionAnswer[];
+}
+
+function minutesAgo(mins: number): string {
+  return new Date(Date.now() - mins * 60_000).toISOString();
+}
+
+const STATIC_QUESTIONS: QuestionItem[] = [
+  {
+    id: "q-1",
+    question: "What is the time complexity of merge sort in the worst case, and why?",
+    course: "Advanced Algorithms",
+    createdAt: minutesAgo(180),
+    answers: [
+      {
+        id: "a-1",
+        student: { name: "Amara Chen", avatar: "AC" },
+        answer: "O(n log n) — the array is always split in half, and merging two halves takes linear time at each of the log n levels.",
+        createdAt: minutesAgo(90),
+      },
+    ],
+  },
+  {
+    id: "q-2",
+    question: "Explain the difference between a stack and a queue, with a real-world example of each.",
+    course: "Data Structures 101",
+    createdAt: minutesAgo(1200),
+    answers: [],
+  },
+  {
+    id: "q-3",
+    question: "Why does normalizing a database reduce redundancy?",
+    course: "Database Systems",
+    createdAt: minutesAgo(1800),
+    answers: [
+      {
+        id: "a-2",
+        student: { name: "Priya Nair", avatar: "PN" },
+        answer: "Each fact is stored in exactly one place, so an update only needs to touch a single row instead of many duplicates.",
+        createdAt: minutesAgo(1400),
+      },
+      {
+        id: "a-3",
+        student: { name: "Diego Ruiz", avatar: "DR" },
+        answer: "It splits data into related tables so the same information isn't repeated across rows.",
+        createdAt: minutesAgo(1100),
+      },
+    ],
+  },
+  {
+    id: "q-4",
+    question: "What happens when a recursive function is written without a base case?",
+    course: "Advanced Algorithms",
+    createdAt: minutesAgo(20),
+    answers: [],
+  },
+  {
+    id: "q-5",
+    question: "How does a hash map achieve close to O(1) average lookup time?",
+    course: "Data Structures 101",
+    createdAt: minutesAgo(15),
+    answers: [],
+  },
+];
 
 export default function Dashboard() {
   const [, setLocation] = useLocation();
   const [uploadOpen, setUploadOpen] = useState(false);
   const [createCourseOpen, setCreateCourseOpen] = useState(false);
+  const [postQuestionOpen, setPostQuestionOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [successBanner, setSuccessBanner] = useState<string | null>(null);
 
-  const [discussions, setDiscussions] = useState<Discussion[]>([]);
-  // Raw records kept alongside the mapped views above — needed to compute
-  // real stats (unique active students, per-course engagement, activity
-  // over time) without re-fetching.
-  const [discussionRecords, setDiscussionRecords] = useState<DiscussionRecord[]>([]);
+  const [questions, setQuestions] = useState<QuestionItem[]>(STATIC_QUESTIONS);
   const [resourceRecords, setResourceRecords] = useState<ResourceRecord[]>([]);
 
   // Upload form state
@@ -207,15 +231,19 @@ export default function Dashboard() {
   const [courseDesc, setCourseDesc] = useState("");
   const [isCreatingCourse, setIsCreatingCourse] = useState(false);
 
+  // Post question form state
+  const [questionText, setQuestionText] = useState("");
+  const [questionCourse, setQuestionCourse] = useState("");
+  const [isPostingQuestion, setIsPostingQuestion] = useState(false);
+
   const showSuccess = (msg: string) => {
     setSuccessBanner(msg);
     setTimeout(() => setSuccessBanner(null), 3500);
   };
 
-  // Re-fetch just resources+discussions after a successful upload, so the
-  // Dashboard reflects the new resource without a full page reload.
-  const fetchResourcesAndDiscussions = async () => {
-  
+  // Re-fetch resources after a successful upload, so the Dashboard reflects
+  // the new resource without a full page reload.
+  const fetchResources = async () => {
     try {
       const res = await authFetch("/courses/resources/all", { method: "GET" });
       if (!res.ok) {
@@ -223,36 +251,17 @@ export default function Dashboard() {
         throw new Error(body?.message ?? `Request failed with status ${res.status}`);
       }
       const payload = await res.json();
-      console.log(payload)
       const records = extractResourceArray(payload);
 
-      const discussionResults = await Promise.all(
-        records.map(async (record) => {
-          try {
-            const dRes = await authFetch(`/discussions?resource=${record._id}`, { method: "GET" });
-            if (!dRes.ok) return [] as DiscussionRecord[];
-            const dPayload = await dRes.json();
-            return Array.isArray(dPayload?.data) ? (dPayload.data as DiscussionRecord[]) : [];
-          } catch {
-            return [] as DiscussionRecord[];
-          }
-        })
-      );
-
-      const resourceViews = records.map((record, i) => toResourceView(record, discussionResults[i].length));
-      const allDiscussionRecords = discussionResults.flat();
-      const allDiscussions = records.flatMap((record, i) =>
-        discussionResults[i].map(d => toDiscussionView(d, courseTitleFromResource(record)))
-      );
+      // Question counts per resource aren't tracked yet since questions are
+      // course-level rather than resource-level for now — default to 0.
+      const resourceViews = records.map((record) => toResourceView(record, 0));
 
       setResourceRecords(records);
       setResources(resourceViews);
-      setDiscussionRecords(allDiscussionRecords);
-      setDiscussions(allDiscussions);
     } catch (err) {
-      console.error("Failed to load resources/discussions:", err);
-    
-    } 
+      console.error("Failed to load resources:", err);
+    }
   };
 
   useEffect(() => {
@@ -270,21 +279,19 @@ export default function Dashboard() {
     }
 
     async function fetchCourses() {
-   ;
- 
       try {
         const res = await authFetch("/courses");
         const data = await res.json();
         if (!res.ok) throw new Error(data.message ?? "Failed to load courses");
         if (!cancelled) setCourses(data.body.courses);
       } catch (err) {
-       console.log(err)
-      } 
+        console.log(err);
+      }
     }
 
     fetchStudents();
     fetchCourses();
-    fetchResourcesAndDiscussions();
+    fetchResources();
 
     return () => {
       cancelled = true;
@@ -314,6 +321,32 @@ export default function Dashboard() {
     }
   };
 
+  // Posting a question is static/local for now: it just gets added to
+  // component state so it shows up immediately in the lists and charts
+  // below. Students answer these on the Discover page.
+  const handlePostQuestion = () => {
+    if (!questionText.trim() || !questionCourse) return;
+    setIsPostingQuestion(true);
+
+    const courseName =
+      (courses as any[]).find((c: any) => c.id === questionCourse)?.name ?? questionCourse;
+
+    const newQuestion: QuestionItem = {
+      id: `q-${Date.now()}`,
+      question: questionText.trim(),
+      course: courseName,
+      createdAt: new Date().toISOString(),
+      answers: [],
+    };
+
+    setQuestions(prev => [newQuestion, ...prev]);
+    setQuestionText("");
+    setQuestionCourse("");
+    setPostQuestionOpen(false);
+    setIsPostingQuestion(false);
+    showSuccess("Question posted. Students will see it on Discover.");
+  };
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -331,87 +364,66 @@ export default function Dashboard() {
     }
   };
 
- const handleUpload = async () => {
-  if (!uploadTitle.trim() || !uploadCourse || !selectedFile) return;
+  const handleUpload = async () => {
+    if (!uploadTitle.trim() || !uploadCourse || !selectedFile) return;
 
-  setIsUploading(true);
+    setIsUploading(true);
 
-  try {
-    const formData = new FormData();
-    formData.append("file", selectedFile);
+    try {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+      formData.append("metadata", JSON.stringify({ subject: uploadTitle.trim() }));
+      formData.append("course", uploadCourse);
+      formData.append("namespace", uploadCourse);
 
-    // Backend expects a single JSON-encoded "metadata" field, not flat
-    // "subject"/"course" fields.
-    formData.append("metadata", JSON.stringify({ subject: uploadTitle.trim() }));
-    formData.append("course", uploadCourse);
-    // Backend reads `namespace` (and optional `external_id`) as plain
-    // fields, not `course`. Using the selected course id as the namespace
-    // so resources are still grouped per-course — verify this matches how
-    // `namespace` is used elsewhere (e.g. for retrieval/search scoping).
-    formData.append("namespace", uploadCourse);
-
-    // Let the browser set the multipart Content-Type/boundary header
-    // itself — do NOT set Content-Type manually here. If authFetch
-    // injects a default 'Content-Type: application/json' header for
-    // every request, that needs to be skipped for FormData bodies or
-    // this request will fail on the backend (multer expects multipart).
-    const res = await authFetch("/courses/resources/upload", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await res.json().catch(() => null);
-
-    if (!res.ok) {
-      throw new Error(data?.message ?? data?.detail ?? `Upload failed with status ${res.status}`);
-    }
-
-    showSuccess("Document uploaded successfully.");
-
-    setUploadTitle("");
-    setUploadCourse("");
-    setSelectedFile(null);
-    setUploadOpen(false);
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
-
-    fetchResourcesAndDiscussions();
-  } catch (err) {
-    console.error(err);
-    showSuccess(err instanceof Error ? err.message : "Something went wrong.");
-  } finally {
-    setIsUploading(false);
-  }
-};
-  const openDiscussions = discussions.filter(d => d.status === "Open");
-
-  // ---------------------------------------------------------------------
-  // Derived stats from real interactions
-  // ---------------------------------------------------------------------
-
-  // Unique student IDs who've asked a question or posted a reply anywhere.
-  // NOTE: addReply records req.userId regardless of role, so if you (the
-  // teacher) reply to threads, you'll be counted here too — there's no
-  // role check on the backend to exclude teacher replies from this set.
-  const activeStudentIds = useMemo(() => {
-    const ids = new Set<string>();
-    discussionRecords.forEach(d => {
-      const askerId = extractUserId(d.user);
-      if (askerId) ids.add(askerId);
-      d.replies?.forEach(r => {
-        const replierId = extractUserId(r.user);
-        if (replierId) ids.add(replierId);
+      const res = await authFetch("/courses/resources/upload", {
+        method: "POST",
+        body: formData,
       });
-    });
-    return ids;
-  }, [discussionRecords]);
 
-  const discussionsToday = useMemo(() => {
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        throw new Error(data?.message ?? data?.detail ?? `Upload failed with status ${res.status}`);
+      }
+
+      showSuccess("Document uploaded successfully.");
+
+      setUploadTitle("");
+      setUploadCourse("");
+      setSelectedFile(null);
+      setUploadOpen(false);
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+
+      fetchResources();
+    } catch (err) {
+      console.error(err);
+      showSuccess(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const openQuestions = useMemo(() => questions.filter(q => q.answers.length === 0), [questions]);
+  const answeredQuestions = useMemo(() => questions.filter(q => q.answers.length > 0), [questions]);
+
+  // ---------------------------------------------------------------------
+  // Derived stats from questions
+  // ---------------------------------------------------------------------
+
+  const activeStudentIds = useMemo(() => {
+    const names = new Set<string>();
+    questions.forEach(q => q.answers.forEach(a => names.add(a.student.name)));
+    return names;
+  }, [questions]);
+
+  const questionsToday = useMemo(() => {
     const todayKey = new Date().toISOString().slice(0, 10);
-    return discussionRecords.filter(d => d.createdAt?.slice(0, 10) === todayKey).length;
-  }, [discussionRecords]);
+    return questions.filter(q => q.createdAt.slice(0, 10) === todayKey).length;
+  }, [questions]);
 
   const resourcesThisWeek = useMemo(() => {
     return resourceRecords.filter(r => {
@@ -421,10 +433,9 @@ export default function Dashboard() {
     }).length;
   }, [resourceRecords]);
 
-  // Discussions created per day, last 7 days — powers the "Recent Courses"
-  // area chart. Falls back to mock data until real discussions have loaded.
+  // Questions posted per day, last 7 days — powers the "Questions Activity"
+  // area chart.
   const activityChartData = useMemo(() => {
-    if (discussionRecords.length === 0) return CHART_ACTIVITY_DATA;
     const days: { key: string; label: string }[] = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
@@ -432,42 +443,37 @@ export default function Dashboard() {
       days.push({ key: d.toISOString().slice(0, 10), label: d.toLocaleDateString(undefined, { weekday: "short" }) });
     }
     const countsByDay = new Map<string, number>();
-    discussionRecords.forEach(d => {
-      if (!d.createdAt) return;
-      const key = d.createdAt.slice(0, 10);
+    questions.forEach(q => {
+      const key = q.createdAt.slice(0, 10);
       countsByDay.set(key, (countsByDay.get(key) ?? 0) + 1);
     });
-    return days.map(({ key, label }) => ({ name: label, discussions: countsByDay.get(key) ?? 0 }));
-  }, [discussionRecords]);
+    return days.map(({ key, label }) => ({ name: label, questions: countsByDay.get(key) ?? 0 }));
+  }, [questions]);
 
-  // Active (unique posting students) vs total (enrolled) per course.
-  // Assumes resource.course._id and course.id refer to the same Mongo _id —
-  // worth verifying in the network tab if this renders all zeroes.
+  // Students who've answered at least one question vs total enrolled, per
+  // course.
   const engagementChartData = useMemo(() => {
-    if (courses.length === 0 || resourceRecords.length === 0) return CHART_ENGAGEMENT_DATA;
-
-    const resourceToCourseId = new Map(resourceRecords.map(r => [r._id, courseIdFromResource(r)]));
     const activeByCourse = new Map<string, Set<string>>();
-
-    discussionRecords.forEach(d => {
-      const courseId = resourceToCourseId.get(d.resource);
-      if (!courseId) return;
-      const set = activeByCourse.get(courseId) ?? new Set<string>();
-      const askerId = extractUserId(d.user);
-      if (askerId) set.add(askerId);
-      d.replies?.forEach(r => {
-        const replierId = extractUserId(r.user);
-        if (replierId) set.add(replierId);
-      });
-      activeByCourse.set(courseId, set);
+    questions.forEach(q => {
+      const set = activeByCourse.get(q.course) ?? new Set<string>();
+      q.answers.forEach(a => set.add(a.student.name));
+      activeByCourse.set(q.course, set);
     });
+
+    if (courses.length === 0) {
+      return Array.from(activeByCourse.entries()).map(([name, set]) => ({
+        name: name.length > 12 ? `${name.slice(0, 12)}…` : name,
+        active: set.size,
+        total: set.size,
+      }));
+    }
 
     return courses.map((c: any) => ({
       name: c.name.length > 12 ? `${c.name.slice(0, 12)}…` : c.name,
-      active: activeByCourse.get(c.id)?.size ?? 0,
+      active: activeByCourse.get(c.name)?.size ?? 0,
       total: c.students ?? 0,
     }));
-  }, [courses, resourceRecords, discussionRecords]);
+  }, [courses, questions]);
 
   // Resources uploaded per week of the current month (rough 4-bucket split,
   // not precise ISO weeks).
@@ -496,7 +502,7 @@ export default function Dashboard() {
       title: "Total Students",
       value: String(students.length),
       icon: Users,
-      trend: `${activeStudentIds.size} active in discussions`,
+      trend: `${activeStudentIds.size} active answering`,
     },
     {
       title: "Resources Uploaded",
@@ -505,17 +511,17 @@ export default function Dashboard() {
       trend: `+${resourcesThisWeek} this week`,
     },
     {
-      title: "Active Discussions",
-      value: String(openDiscussions.length),
-      icon: MessageSquare,
-      trend: `+${discussionsToday} today`,
+      title: "Open Questions",
+      value: String(openQuestions.length),
+      icon: HelpCircle,
+      trend: `+${questionsToday} today`,
     },
   ];
 
   return (
     <div className="min-h-screen flex flex-col bg-muted/20">
       <NavBar
-        hasNotifications={openDiscussions.length > 0}
+        hasNotifications={openQuestions.length > 0}
         notifOpen={notifOpen}
         onNotifOpenChange={setNotifOpen}
         avatarInitials="Prof"
@@ -530,25 +536,25 @@ export default function Dashboard() {
           <>
             <div className="p-3 border-b flex items-center justify-between">
               <span className="font-semibold text-sm">Notifications</span>
-              <Badge variant="destructive" className="rounded-full text-[10px] h-5 px-2">{openDiscussions.length} new</Badge>
+              <Badge variant="destructive" className="rounded-full text-[10px] h-5 px-2">{openQuestions.length} new</Badge>
             </div>
             <div className="flex flex-col divide-y max-h-72 overflow-y-auto">
-              {discussions.map(d => (
+              {questions.map(q => (
                 <button
-                  key={d.id}
+                  key={q.id}
                   className="p-3 text-left hover:bg-muted/50 transition-colors w-full"
-                  onClick={() => { setNotifOpen(false); setLocation("/viewer"); }}
+                  onClick={() => setNotifOpen(false)}
                 >
                   <div className="flex items-center gap-2 mb-1">
-                    <Avatar className="h-6 w-6 shrink-0 border">
-                      <AvatarFallback className="text-[10px] bg-primary/5">{d.user.avatar}</AvatarFallback>
-                    </Avatar>
-                    <span className="font-medium text-xs">{d.user.name}</span>
-                    <Badge variant={d.status === "Open" ? "outline" : "secondary"} className="text-[10px] px-1.5 py-0 ml-auto">
-                      {d.status}
+                    <div className="h-6 w-6 shrink-0 rounded-full bg-primary/10 flex items-center justify-center">
+                      <HelpCircle className="h-3.5 w-3.5 text-primary" />
+                    </div>
+                    <span className="font-medium text-xs">{q.course}</span>
+                    <Badge variant={q.answers.length === 0 ? "outline" : "secondary"} className="text-[10px] px-1.5 py-0 ml-auto">
+                      {q.answers.length === 0 ? "Open" : `${q.answers.length} answered`}
                     </Badge>
                   </div>
-                  <p className="text-xs text-muted-foreground line-clamp-2 pl-8">{d.question}</p>
+                  <p className="text-xs text-muted-foreground line-clamp-2 pl-8">{q.question}</p>
                 </button>
               ))}
             </div>
@@ -589,6 +595,9 @@ export default function Dashboard() {
             <Button variant="outline" onClick={() => setUploadOpen(true)} data-testid="button-upload-resource">
               <Upload className="h-4 w-4 mr-2" /> Upload Resource
             </Button>
+            <Button variant="outline" onClick={() => setPostQuestionOpen(true)} data-testid="button-post-question">
+              <HelpCircle className="h-4 w-4 mr-2" /> Post Question
+            </Button>
             <Button onClick={() => setCreateCourseOpen(true)} data-testid="button-create-course">
               <Plus className="h-4 w-4 mr-2" /> Create Course
             </Button>
@@ -624,7 +633,7 @@ export default function Dashboard() {
           <Card className="lg:col-span-2 shadow-sm border-muted">
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <div className="space-y-1">
-                <CardTitle className="text-base font-semibold">Discussion Activity</CardTitle>
+                <CardTitle className="text-base font-semibold">Questions Posted</CardTitle>
                 <CardDescription>Questions posted per day, last 7 days</CardDescription>
               </div>
               <Button variant="ghost" size="sm" className="text-primary h-8" data-testid="button-view-all-courses">
@@ -636,7 +645,7 @@ export default function Dashboard() {
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={activityChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                     <defs>
-                      <linearGradient id="colorDiscussions" x1="0" y1="0" x2="0" y2="1">
+                      <linearGradient id="colorQuestions" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
                         <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
                       </linearGradient>
@@ -645,7 +654,7 @@ export default function Dashboard() {
                     <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} dy={10} />
                     <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }} />
                     <Tooltip contentStyle={{ backgroundColor: 'hsl(var(--card))', borderRadius: '8px', border: '1px solid hsl(var(--border))' }} itemStyle={{ color: 'hsl(var(--foreground))' }} />
-                    <Area type="monotone" dataKey="discussions" stroke="hsl(var(--primary))" strokeWidth={2} fillOpacity={1} fill="url(#colorDiscussions)" />
+                    <Area type="monotone" dataKey="questions" stroke="hsl(var(--primary))" strokeWidth={2} fillOpacity={1} fill="url(#colorQuestions)" />
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
@@ -655,7 +664,7 @@ export default function Dashboard() {
           <Card className="shadow-sm border-muted">
             <CardHeader>
               <CardTitle className="text-base font-semibold">Student Engagement</CardTitle>
-              <CardDescription>Active (posted/replied) vs enrolled, per course</CardDescription>
+              <CardDescription>Students who've answered vs enrolled, per course</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="h-[220px] w-full">
@@ -694,7 +703,7 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
-        {/* Courses Table + Unresolved Questions */}
+        {/* Courses Table + Open Questions */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <Card className="lg:col-span-2 shadow-sm border-muted">
             <CardHeader className="flex flex-row items-center justify-between pb-2">
@@ -714,7 +723,6 @@ export default function Dashboard() {
                     <TableHead className="text-right">Students</TableHead>
                     <TableHead className="text-right">Resources</TableHead>
                     <TableHead className="hidden md:table-cell">Status</TableHead>
-                  
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -738,7 +746,6 @@ export default function Dashboard() {
                           {course.status}
                         </Badge>
                       </TableCell>
-                     
                     </TableRow>
                   ))}
                 </TableBody>
@@ -749,39 +756,35 @@ export default function Dashboard() {
           <Card className="shadow-sm border-muted flex flex-col">
             <CardHeader className="pb-4">
               <CardTitle className="text-base font-semibold flex justify-between items-center">
-                Unresolved Questions
+                Open Questions
                 <Badge variant="destructive" className="ml-2 font-normal rounded-full text-[10px]">
-                  {openDiscussions.length} New
+                  {openQuestions.length} New
                 </Badge>
               </CardTitle>
             </CardHeader>
             <CardContent className="flex-1 flex flex-col gap-5">
-              {openDiscussions.map((discussion) => (
-                <div key={discussion.id} className="flex gap-3 group relative">
+              {openQuestions.length === 0 && (
+                <p className="text-sm text-muted-foreground">All questions have been answered. Post a new one to keep students engaged.</p>
+              )}
+              {openQuestions.map((q) => (
+                <div key={q.id} className="flex gap-3 group relative">
                   <Avatar className="h-8 w-8 shrink-0 border z-10 bg-background">
-                    <AvatarFallback className="text-xs bg-primary/5">{discussion.user.avatar}</AvatarFallback>
+                    <AvatarFallback className="text-xs bg-primary/5">
+                      <HelpCircle className="h-3.5 w-3.5 text-primary" />
+                    </AvatarFallback>
                   </Avatar>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-2 mb-1">
-                      <span className="font-medium text-sm text-foreground truncate">{discussion.user.name}</span>
-                      <span className="text-xs text-muted-foreground whitespace-nowrap">{discussion.time}</span>
+                      <span className="font-medium text-sm text-foreground truncate">{q.course}</span>
+                      <span className="text-xs text-muted-foreground whitespace-nowrap">{formatRelativeTime(q.createdAt)}</span>
                     </div>
                     <div className="bg-muted/40 p-2.5 rounded-md mb-2">
-                      <p className="text-sm text-muted-foreground line-clamp-2">{discussion.question}</p>
+                      <p className="text-sm text-muted-foreground line-clamp-2">{q.question}</p>
                     </div>
                     <div className="flex items-center justify-between mt-1">
                       <span className="text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded">
-                        {discussion.course} &middot; p. {discussion.page}
+                        Awaiting student answers
                       </span>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 text-xs text-muted-foreground group-hover:text-primary transition-colors"
-                        onClick={() => setLocation(`/viewer/${discussion.resourceId}`)}
-                        data-testid={`button-reply-discussion-${discussion.id}`}
-                      >
-                        Reply <ArrowUpRight className="h-3 w-3 ml-1" />
-                      </Button>
                     </div>
                   </div>
                 </div>
@@ -790,54 +793,55 @@ export default function Dashboard() {
           </Card>
         </div>
 
-        {/* Recent Uploads */}
+        {/* Answered Questions */}
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold">Recent Uploads</h2>
+            <h2 className="text-lg font-semibold">Answered Questions</h2>
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setUploadOpen(true)}
-              data-testid="button-upload-resource-secondary"
+              onClick={() => setPostQuestionOpen(true)}
+              data-testid="button-post-question-secondary"
             >
-              <Upload className="h-3.5 w-3.5 mr-2" /> Upload
+              <HelpCircle className="h-3.5 w-3.5 mr-2" /> Post Question
             </Button>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {resources.slice(0, 4).map((resource) => (
+            {answeredQuestions.slice(0, 4).map((q) => (
               <Card
-                key={resource.id}
+                key={q.id}
                 className="shadow-sm border-muted hover:border-primary/40 transition-all cursor-pointer group hover:shadow-md"
-                data-testid={`card-resource-${resource.id}`}
+                data-testid={`card-question-${q.id}`}
               >
                 <CardContent className="p-4 flex flex-col gap-3">
                   <div className="flex items-start justify-between">
-                    <div className="p-2 bg-red-500/10 text-red-500 rounded-md">
-                      <FileText className="h-5 w-5" />
+                    <div className="p-2 bg-primary/10 text-primary rounded-md">
+                      <HelpCircle className="h-5 w-5" />
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity"
-                      onClick={() => setLocation(`/viewer/${resource.id}`)}
-                      data-testid={`button-open-resource-${resource.id}`}
-                    >
-                      <ArrowUpRight className="h-4 w-4" />
-                    </Button>
+                    <div className="flex -space-x-2">
+                      {q.answers.slice(0, 3).map(a => (
+                        <Avatar key={a.id} className="h-6 w-6 border-2 border-background">
+                          <AvatarFallback className="text-[10px] bg-primary/10">{a.student.avatar}</AvatarFallback>
+                        </Avatar>
+                      ))}
+                    </div>
                   </div>
                   <div>
-                    <h3 className="font-medium text-sm truncate" title={resource.title}>{resource.title}</h3>
-                    <p className="text-xs text-muted-foreground mt-1 truncate">{resource.course}</p>
+                    <h3 className="font-medium text-sm line-clamp-2" title={q.question}>{q.question}</h3>
+                    <p className="text-xs text-muted-foreground mt-1 truncate">{q.course}</p>
                   </div>
                   <div className="flex items-center justify-between text-xs mt-2 pt-3 border-t">
-                    <span className="text-muted-foreground">{resource.uploadDate}</span>
+                    <span className="text-muted-foreground">{formatRelativeTime(q.createdAt)}</span>
                     <span className="flex items-center gap-1 font-medium text-muted-foreground">
-                      <MessageSquare className="h-3 w-3" /> {resource.discussions}
+                      <MessageSquare className="h-3 w-3" /> {q.answers.length}
                     </span>
                   </div>
                 </CardContent>
               </Card>
             ))}
+            {answeredQuestions.length === 0 && (
+              <p className="text-sm text-muted-foreground col-span-full">No answers yet — check back once students respond.</p>
+            )}
           </div>
         </div>
       </main>
@@ -860,8 +864,6 @@ export default function Dashboard() {
           </DialogHeader>
 
           <div className="flex flex-col gap-4 py-2">
-
-            {/* Subject */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="upload-title">Subject</Label>
               <Input
@@ -872,7 +874,6 @@ export default function Dashboard() {
               />
             </div>
 
-            {/* Course — required for the upload button to enable */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="upload-course">Course</Label>
               <Select value={uploadCourse} onValueChange={setUploadCourse}>
@@ -894,7 +895,6 @@ export default function Dashboard() {
               )}
             </div>
 
-            {/* PDF */}
             <div className="flex flex-col gap-1.5">
               <Label>PDF File</Label>
 
@@ -948,7 +948,6 @@ export default function Dashboard() {
                 </div>
               )}
             </div>
-
           </div>
 
           <DialogFooter>
@@ -969,6 +968,76 @@ export default function Dashboard() {
               }
             >
               {isUploading ? "Uploading..." : "Upload Document"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Post Question Dialog */}
+      <Dialog
+        open={postQuestionOpen}
+        onOpenChange={(open) => {
+          setPostQuestionOpen(open);
+          if (!open) {
+            setQuestionText("");
+            setQuestionCourse("");
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Post a Question</DialogTitle>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-4 py-2">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="question-course">Course</Label>
+              <Select value={questionCourse} onValueChange={setQuestionCourse}>
+                <SelectTrigger id="question-course" data-testid="select-question-course">
+                  <SelectValue placeholder="Select a course" />
+                </SelectTrigger>
+                <SelectContent>
+                  {courses.map((c: any) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {courses.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Create a course first before posting a question.
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="question-text">Question</Label>
+              <Textarea
+                id="question-text"
+                placeholder="e.g. What is the time complexity of binary search?"
+                rows={4}
+                className="resize-none"
+                value={questionText}
+                onChange={(e) => setQuestionText(e.target.value)}
+                data-testid="input-question-text"
+              />
+              <p className="text-xs text-muted-foreground">
+                Students will see this question on the Discover page and can submit an answer.
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPostQuestionOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handlePostQuestion}
+              disabled={!questionText.trim() || !questionCourse || isPostingQuestion}
+              data-testid="button-confirm-post-question"
+            >
+              {isPostingQuestion ? "Posting..." : "Post Question"}
             </Button>
           </DialogFooter>
         </DialogContent>

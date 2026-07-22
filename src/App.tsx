@@ -15,6 +15,7 @@ import { useEffect } from "react";
 import { Loader2 } from "lucide-react";
 import ViewerPage from "./pages/viewerPage";
 
+import Assessments from "./pages/assesment";
 const queryClient = new QueryClient();
 
 function RequireAuth({ children, teacherOnly = false }: { children: React.ReactNode; teacherOnly?: boolean }) {
@@ -45,7 +46,7 @@ function RequireGuest({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!isLoading && user) {
-      navigate(user.role === "teacher" ? "/dashboard" : "/viewer");
+      navigate(user.role === "teacher" ? "/dashboard" : "/questions");
     }
   }, [user, isLoading, navigate]);
 
@@ -74,6 +75,9 @@ function Router() {
 </Route>
       <Route path="/dashboard">
         <RequireAuth teacherOnly><Dashboard /></RequireAuth>
+      </Route>
+      <Route path="/questions">
+        <RequireAuth><Assessments /></RequireAuth>
       </Route>
      <Route path="/profile/:id?">
   <RequireAuth><Profile /></RequireAuth>

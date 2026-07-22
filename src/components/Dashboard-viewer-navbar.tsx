@@ -1,6 +1,7 @@
 import { type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import { Bell, Sun, Moon, BookOpen, User, Settings, LogOut } from "lucide-react";
+import { Bell, Sun, Moon, BookOpen, ClipboardCheck, User, Settings, LogOut } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -63,9 +64,10 @@ export function NavBar({
         {centerContent}
       </div>
 
-      <div className="flex items-center gap-3 shrink-0">
-        
-
+   <div className="flex items-center gap-3 shrink-0">
+        <Button variant="ghost" size="sm" className="hidden sm:flex" onClick={() => setLocation("/questions")}>
+          <ClipboardCheck className="mr-2 h-4 w-4" /> Assessments
+        </Button>
         <Popover open={notifOpen} onOpenChange={onNotifOpenChange}>
           <PopoverTrigger asChild>
             <Button
