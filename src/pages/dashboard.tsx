@@ -15,13 +15,13 @@ import {
 } from "recharts";
 import {
   BookOpen, Users, FileText, MessageSquare, Plus,
-  ArrowUpRight, CheckCircle2, TrendingUp, Upload, FileCheck, X, HelpCircle,
+   CheckCircle2, TrendingUp, Upload, FileCheck, X, HelpCircle,
 } from "lucide-react";
 import {
   MOCK_COURSES,
   CHART_UPLOADS_DATA,
 } from "@/lib/mock-data";
-import { useLocation } from "wouter";
+
 import { authFetch } from "@/lib/auth-context";
 import { motion, AnimatePresence } from "framer-motion";
 import { NavBar } from "@/components/Dashboard-viewer-navbar";
@@ -58,13 +58,7 @@ function courseTitleFromResource(record: { course: ResourceRecord["course"] }): 
   return "Untitled course";
 }
 
-function courseIdFromResource(record: { course: ResourceRecord["course"] }): string | undefined {
-  if (typeof record.course === "string") return record.course;
-  if (record.course && typeof record.course === "object" && "_id" in record.course) {
-    return (record.course as { _id?: string })._id;
-  }
-  return undefined;
-}
+
 
 function toResourceView(record: ResourceRecord, questionCount: number): ResourceView {
   const uploadDate = record.createdAt
@@ -99,12 +93,7 @@ function extractResourceArray(payload: unknown): ResourceRecord[] {
   return [];
 }
 
-function getInitials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
+
 
 function formatRelativeTime(dateString?: string): string {
   if (!dateString) return "";
@@ -204,7 +193,7 @@ const STATIC_QUESTIONS: QuestionItem[] = [
 ];
 
 export default function Dashboard() {
-  const [, setLocation] = useLocation();
+  
   const [uploadOpen, setUploadOpen] = useState(false);
   const [createCourseOpen, setCreateCourseOpen] = useState(false);
   const [postQuestionOpen, setPostQuestionOpen] = useState(false);

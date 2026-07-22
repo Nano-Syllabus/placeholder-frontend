@@ -1,32 +1,31 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
   Download, Maximize, Minimize, ZoomIn, ZoomOut,
-  ChevronLeft, ChevronRight, MessageSquare, Send, CheckCircle2, Circle,
-  FileText, X, MapPin, Loader2, Layers, AlertTriangle, Eye, EyeOff
+  Highlighter, CheckCircle2, FileText, X, Loader2, Layers, Eye, EyeOff, Pencil, Trash2, ChevronRight
 } from "lucide-react";
-import type { Discussion, Reply, PinPosition } from "@/lib/mock-data";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { motion, AnimatePresence } from "framer-motion";
 import { NavBar } from "@/components/Dashboard-viewer-navbar";
-import { authFetch } from "@/lib/auth-context";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
 
 const ZOOM_LEVELS = [50, 75, 100, 125, 150, 200];
 const BASE_PAGE_WIDTH = 760;
+// Below this size (in normalized % of page width/height) a drag is treated
+// as an accidental click rather than a deliberate highlight.
+const MIN_HIGHLIGHT_SIZE = 1.5;
 
 // ---------------------------------------------------------------------------
 // Props — a single PDF resource, rather than a fetched list of resources.
@@ -35,7 +34,7 @@ const BASE_PAGE_WIDTH = 760;
 // ---------------------------------------------------------------------------
 
 export interface ViewerProps {
-  /** Resource id — used to scope the discussions API and as document identity. */
+  /** Resource id — document identity, kept for parity with the route/caller. */
   resourceId: string;
   /** Direct URL (or path) to the PDF file to render. */
   fileUrl: string;
@@ -43,56 +42,36 @@ export interface ViewerProps {
   title: string;
   /** Optional course label for the breadcrumb. */
   course?: string;
-  /** Optional known page count, used for the "Page X of Y" label before the PDF finishes loading. */
+  /** Optional known page count, used before the PDF finishes loading. */
   pages?: number;
+  /** Optional max marks for this document, shown next to the running total. */
+  maxMarks?: number;
 }
 
 // ---------------------------------------------------------------------------
-// Discussion types
+// Grading highlights — replaces the old discussion/pin threads. A highlight
+// is a dragged rectangle on a page with an attached mark + feedback comment.
 //
-// Mirrors what the Discussion mongoose model + controllers actually return.
-// `user`/`replies[].user` come back populated with { _id, user_name, profile_pic }
-// on GET/POST-thread/POST-reply, but the PATCH endpoints (status, edit) return
-// the raw unpopulated document — see the merge logic in markResolved below.
+// NOTE: this is local component state only for now (no backend call), same
+// as the earlier static "Questions" feature — wire up a persistence endpoint
+// here if you want highlights to survive a refresh / be visible to both
+// teacher and student.
 // ---------------------------------------------------------------------------
 
-interface DiscussionUserRecord {
-  _id: string;
-  user_name: string;
-  profile_pic?: string;
+interface HighlightRect {
+  x: number; // % of page width
+  y: number; // % of page height
+  width: number; // % of page width
+  height: number; // % of page height
 }
 
-interface ReplyRecord {
-  _id?: string;
-  user: DiscussionUserRecord | string;
-  message: string;
-  createdAt?: string;
-}
-
-interface DiscussionRecord {
-  _id: string;
-  resource: string;
-  user: DiscussionUserRecord | string;
-  question: string;
+interface Highlight {
+  id: string;
   page: number;
-  position?: PinPosition;
-  status: "Open" | "Resolved";
-  replies: ReplyRecord[];
-  createdAt?: string;
-}
-
-function getInitials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
-
-function toDiscussionUser(user: DiscussionUserRecord | string | undefined): { name: string; avatar: string } {
-  if (user && typeof user === "object" && "user_name" in user) {
-    return { name: user.user_name, avatar: getInitials(user.user_name) };
-  }
-  return { name: "Unknown user", avatar: "?" };
+  rect: HighlightRect;
+  marks: number | null;
+  feedback: string;
+  createdAt: string;
 }
 
 function formatRelativeTime(dateString?: string): string {
@@ -109,43 +88,17 @@ function formatRelativeTime(dateString?: string): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function toReplyView(record: ReplyRecord): Reply {
-  return {
-    user: toDiscussionUser(record.user),
-    message: record.message,
-    time: formatRelativeTime(record.createdAt),
-  };
+function normalizeRect(a: { x: number; y: number }, b: { x: number; y: number }): HighlightRect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  const width = Math.abs(b.x - a.x);
+  const height = Math.abs(b.y - a.y);
+  return { x, y, width, height };
 }
 
-function toDiscussionView(record: DiscussionRecord, courseTitle: string): Discussion {
-  return {
-    id: record._id,
-    resourceId: record.resource,
-    user: toDiscussionUser(record.user),
-    course: courseTitle,
-    question: record.question,
-    page: record.page,
-    time: formatRelativeTime(record.createdAt),
-    status: record.status,
-    replies: (record.replies ?? []).map(toReplyView),
-    position: record.position,
-  };
-}
-
-function extractDiscussionArray(payload: unknown): DiscussionRecord[] {
-  if (payload && typeof payload === "object" && Array.isArray((payload as Record<string, unknown>).data)) {
-    return (payload as Record<string, unknown>).data as DiscussionRecord[];
-  }
-  return [];
-}
-
-export default function Viewer({ resourceId, fileUrl, title, course, pages }: ViewerProps) {
-  const [expandedThread, setExpandedThread] = useState<string | null>(null);
-  const [replyTexts, setReplyTexts] = useState<Record<string, string>>({});
-
-  const [discussions, setDiscussions] = useState<Discussion[]>([]);
-  const [discussionsLoading, setDiscussionsLoading] = useState(false);
-  const [discussionsError, setDiscussionsError] = useState<string | null>(null);
+export default function Viewer({ resourceId, fileUrl, title, course, pages, maxMarks }: ViewerProps) {
+  const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [expandedHighlight, setExpandedHighlight] = useState<string | null>(null);
 
   const [currentPage, setCurrentPage] = useState(1);
   const [numPages, setNumPages] = useState<number | null>(null);
@@ -155,118 +108,76 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages }: Vi
   const [notifOpen, setNotifOpen] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(true);
   const [pageFilter, setPageFilter] = useState<"all" | "current">("all");
-  const [showPins, setShowPins] = useState(true);
+  const [showHighlights, setShowHighlights] = useState(true);
 
-  const [placingPin, setPlacingPin] = useState(false);
-  const [pendingPosition, setPendingPosition] = useState<PinPosition | null>(null);
-  const [newQuestion, setNewQuestion] = useState("");
-  const [discussionDialogOpen, setDiscussionDialogOpen] = useState(false);
-  const [submittingDiscussion, setSubmittingDiscussion] = useState(false);
-  const [discussionSubmitError, setDiscussionSubmitError] = useState<string | null>(null);
-  const [replySubmittingId, setReplySubmittingId] = useState<string | null>(null);
+  // Highlight placement / editing
+  const [placingHighlight, setPlacingHighlight] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStateRef = useRef<{ page: number; start: { x: number; y: number } } | null>(null);
+  const [draftRect, setDraftRect] = useState<{ page: number; rect: HighlightRect } | null>(null);
+  const [highlightDialogOpen, setHighlightDialogOpen] = useState(false);
+  const [editingHighlightId, setEditingHighlightId] = useState<string | null>(null);
+  const [marksInput, setMarksInput] = useState("");
+  const [feedbackInput, setFeedbackInput] = useState("");
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const docAreaRef = useRef<HTMLDivElement>(null);
-
-  // Reset viewer state whenever the resource identity changes (e.g. the
-  // caller navigates to a different PDF and re-renders this component with
-  // new props).
-  useEffect(() => {
-    setCurrentPage(1);
-    setNumPages(null);
-    setPdfLoading(true);
-    setExpandedThread(null);
-    setPlacingPin(false);
-    setPageFilter("all");
-  }, [resourceId, fileUrl]);
-
-  // GET /api/discussions?resource=<resourceId> — refetch whenever the
-  // resource changes.
-  useEffect(() => {
-    if (!resourceId) {
-      setDiscussions([]);
-      return;
-    }
-
-    let cancelled = false;
-
-    const getDiscussionsForResource = async () => {
-      setDiscussionsLoading(true);
-      setDiscussionsError(null);
-
-      try {
-        const res = await authFetch(`/discussions?resource=${resourceId}`, { method: "GET" });
-
-        if (!res.ok) {
-          const body = await res.json().catch(() => null);
-          throw new Error(body?.message ?? `Request failed with status ${res.status}`);
-        }
-
-        const payload = await res.json();
-        const records = extractDiscussionArray(payload);
-        const mapped = records.map(r => toDiscussionView(r, course ?? ""));
-
-        if (cancelled) return;
-        setDiscussions(mapped);
-      } catch (err) {
-        if (cancelled) return;
-        console.error("Failed to load discussions:", err);
-        setDiscussionsError(err instanceof Error ? err.message : "Failed to load discussions");
-        setDiscussions([]);
-      } finally {
-        if (!cancelled) setDiscussionsLoading(false);
-      }
-    };
-
-    getDiscussionsForResource();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [resourceId, course]);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
   const totalPages = numPages ?? pages ?? 1;
   const zoomLevel = ZOOM_LEVELS[zoomIndex];
   const pageWidth = (zoomLevel / 100) * BASE_PAGE_WIDTH;
 
-  // discussions is already scoped to resourceId by the API query param
-  const resourceDiscussions = discussions;
-
-  const sidebarDiscussions =
-    pageFilter === "current"
-      ? resourceDiscussions.filter(d => d.page === currentPage)
-      : resourceDiscussions;
-
-  const currentPagePins = resourceDiscussions.filter(d => d.page === currentPage && d.position);
-
-  // resourceDiscussions is newest-first (server sorts by createdAt: -1, and
-  // new local discussions are prepended) — reverse it so pin #1 is always the
-  // first discussion ever pinned, and numbers only climb as more are added,
-  // instead of shuffling around on every new post.
-  const allResourcePins = resourceDiscussions.filter(d => d.position);
-  const chronologicalPins = [...allResourcePins].reverse();
-  const getPinNumber = (id: string) => chronologicalPins.findIndex(d => d.id === id) + 1;
-
-  const pageGroups: Record<number, Discussion[]> = {};
-  sidebarDiscussions.forEach(d => {
-    if (!pageGroups[d.page]) pageGroups[d.page] = [];
-    pageGroups[d.page].push(d);
-  });
-  const sortedPages = Object.keys(pageGroups).map(Number).sort((a, b) => a - b);
+  // Reset viewer state whenever the resource identity changes.
+  useEffect(() => {
+    setCurrentPage(1);
+    setNumPages(null);
+    setPdfLoading(true);
+    setExpandedHighlight(null);
+    setPlacingHighlight(false);
+    setPageFilter("all");
+    setHighlights([]);
+    pageRefs.current.clear();
+  }, [resourceId, fileUrl]);
 
   const handleDocumentLoadSuccess = ({ numPages: n }: { numPages: number }) => {
     setNumPages(n);
     setPdfLoading(false);
   };
 
-  const goToPage = (delta: number) => {
-    setCurrentPage(p => Math.max(1, Math.min(totalPages, p + delta)));
-    setExpandedThread(null);
-  };
+  // Track which page is most visible while scrolling, so the "Page X of Y"
+  // label and "current page" filter stay accurate without explicit nav
+  // buttons.
+  useEffect(() => {
+    if (!numPages) return;
+    const root = scrollAreaRef.current;
+    if (!root) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter(e => e.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (visible) {
+          const page = Number((visible.target as HTMLElement).dataset.page);
+          if (page) setCurrentPage(page);
+        }
+      },
+      { root, threshold: [0.25, 0.5, 0.75] }
+    );
+
+    pageRefs.current.forEach(el => observer.observe(el));
+    return () => observer.disconnect();
+  }, [numPages, pageWidth]);
+
+  const scrollToPage = useCallback((page: number) => {
+    const el = pageRefs.current.get(page);
+    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
 
   const jumpToPage = (page: number) => {
-    setCurrentPage(Math.max(1, Math.min(totalPages, page)));
-    setExpandedThread(null);
+    scrollToPage(page);
+    setExpandedHighlight(null);
     if (pageFilter === "all") setPageFilter("current");
   };
 
@@ -289,123 +200,140 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages }: Vi
     }
   };
 
-  const handleDocClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!placingPin || !docAreaRef.current) return;
-    const rect = docAreaRef.current.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 100;
-    const y = ((e.clientY - rect.top) / rect.height) * 100;
-    setPendingPosition({ x, y });
-    setPlacingPin(false);
-    setDiscussionDialogOpen(true);
+  // -------------------------------------------------------------------
+  // Drag-to-highlight — mousedown on a page starts the drag, mousemove
+  // (attached to window while dragging) updates the rect, mouseup finalizes
+  // it and opens the marks/feedback dialog.
+  // -------------------------------------------------------------------
+
+  const pointFromEvent = (page: number, clientX: number, clientY: number) => {
+    const el = pageRefs.current.get(page);
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    return {
+      x: ((clientX - rect.left) / rect.width) * 100,
+      y: ((clientY - rect.top) / rect.height) * 100,
+    };
   };
 
-  // POST /api/discussions
-  const submitDiscussion = async () => {
-    if (!newQuestion.trim()) return;
+  const handlePageMouseDown = (page: number) => (e: React.MouseEvent) => {
+    if (!placingHighlight) return;
+    const start = pointFromEvent(page, e.clientX, e.clientY);
+    if (!start) return;
+    dragStateRef.current = { page, start };
+    setIsDragging(true);
+    setDraftRect({ page, rect: { x: start.x, y: start.y, width: 0, height: 0 } });
+  };
 
-    setSubmittingDiscussion(true);
-    setDiscussionSubmitError(null);
+  useEffect(() => {
+    if (!isDragging) return;
 
-    try {
-      const res = await authFetch("/discussions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          resource: resourceId,
-          question: newQuestion.trim(),
-          page: currentPage,
-          position: pendingPosition ?? undefined,
-        }),
+    const handleMouseMove = (e: MouseEvent) => {
+      const drag = dragStateRef.current;
+      if (!drag) return;
+      const current = pointFromEvent(drag.page, e.clientX, e.clientY);
+      if (!current) return;
+      setDraftRect({ page: drag.page, rect: normalizeRect(drag.start, current) });
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+      const drag = dragStateRef.current;
+      dragStateRef.current = null;
+      setPlacingHighlight(false);
+
+      setDraftRect(current => {
+        if (!current || !drag) return null;
+        if (current.rect.width < MIN_HIGHLIGHT_SIZE || current.rect.height < MIN_HIGHLIGHT_SIZE) {
+          return null; // too small — treat as an accidental click, discard
+        }
+        setMarksInput("");
+        setFeedbackInput("");
+        setEditingHighlightId(null);
+        setHighlightDialogOpen(true);
+        return current;
       });
+    };
 
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.message ?? `Request failed with status ${res.status}`);
-      }
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isDragging]);
 
-      const payload = await res.json();
-      const created = toDiscussionView(payload.data, course ?? "");
-
-      setDiscussions(prev => [created, ...prev]);
-      setNewQuestion("");
-      setPendingPosition(null);
-      setDiscussionDialogOpen(false);
-      setExpandedThread(created.id);
-      setPageFilter("current");
-    } catch (err) {
-      console.error("Failed to create discussion:", err);
-      setDiscussionSubmitError(err instanceof Error ? err.message : "Failed to post discussion");
-    } finally {
-      setSubmittingDiscussion(false);
-    }
+  const openEditHighlight = (h: Highlight) => {
+    setEditingHighlightId(h.id);
+    setDraftRect({ page: h.page, rect: h.rect });
+    setMarksInput(h.marks !== null ? String(h.marks) : "");
+    setFeedbackInput(h.feedback);
+    setHighlightDialogOpen(true);
   };
 
-  // POST /api/discussions/:id/replies
-  // NOTE: addReply only populates replies.user server-side, not the thread's
-  // top-level user — so we merge just the replies array in rather than
-  // replacing the whole discussion object.
-  const sendReply = async (discussionId: string) => {
-    const text = replyTexts[discussionId]?.trim();
-    if (!text) return;
+  const saveHighlight = () => {
+    if (!draftRect) return;
+    const parsedMarks = marksInput.trim() === "" ? null : Number(marksInput);
+    const marks = parsedMarks !== null && Number.isFinite(parsedMarks) ? parsedMarks : null;
 
-    setReplySubmittingId(discussionId);
-
-    try {
-      const res = await authFetch(`/discussions/${discussionId}/replies`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
-      });
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.message ?? `Request failed with status ${res.status}`);
-      }
-
-      const payload = await res.json();
-      const updatedReplies = (payload.data.replies ?? []).map(toReplyView);
-
-      setDiscussions(prev =>
-        prev.map(d => (d.id === discussionId ? { ...d, replies: updatedReplies } : d))
+    if (editingHighlightId) {
+      setHighlights(prev =>
+        prev.map(h => (h.id === editingHighlightId ? { ...h, marks, feedback: feedbackInput.trim() } : h))
       );
-      setReplyTexts(prev => ({ ...prev, [discussionId]: "" }));
-    } catch (err) {
-      console.error("Failed to add reply:", err);
-    } finally {
-      setReplySubmittingId(null);
+    } else {
+      const created: Highlight = {
+        id: `h-${Date.now()}`,
+        page: draftRect.page,
+        rect: draftRect.rect,
+        marks,
+        feedback: feedbackInput.trim(),
+        createdAt: new Date().toISOString(),
+      };
+      setHighlights(prev => [created, ...prev]);
+      setExpandedHighlight(created.id);
     }
+
+    setHighlightDialogOpen(false);
+    setDraftRect(null);
+    setEditingHighlightId(null);
+    setMarksInput("");
+    setFeedbackInput("");
   };
 
-  // PATCH /api/discussions/:id/status
-  // Optimistic toggle with rollback on failure — the endpoint doesn't
-  // repopulate user/replies.user, so there's nothing useful to merge back in
-  // besides the status itself.
-  const markResolved = async (discussionId: string) => {
-    setDiscussions(prev =>
-      prev.map(d => (d.id === discussionId ? { ...d, status: d.status === "Open" ? "Resolved" : "Open" } : d))
-    );
-
-    try {
-      const res = await authFetch(`/discussions/${discussionId}/status`, { method: "PATCH" });
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        throw new Error(body?.message ?? `Request failed with status ${res.status}`);
-      }
-    } catch (err) {
-      console.error("Failed to toggle discussion status:", err);
-      setDiscussions(prev =>
-        prev.map(d => (d.id === discussionId ? { ...d, status: d.status === "Open" ? "Resolved" : "Open" } : d))
-      );
-    }
+  const deleteHighlight = (id: string) => {
+    setHighlights(prev => prev.filter(h => h.id !== id));
+    if (expandedHighlight === id) setExpandedHighlight(null);
   };
 
-  const openCount = resourceDiscussions.filter(d => d.status === "Open").length;
+  const cancelHighlightDialog = () => {
+    setHighlightDialogOpen(false);
+    setDraftRect(null);
+    setEditingHighlightId(null);
+  };
+
+  // -------------------------------------------------------------------
+  // Derived views
+  // -------------------------------------------------------------------
+
+  const sidebarHighlights = pageFilter === "current" ? highlights.filter(h => h.page === currentPage) : highlights;
+
+  const pageGroups: Record<number, Highlight[]> = {};
+  sidebarHighlights.forEach(h => {
+    if (!pageGroups[h.page]) pageGroups[h.page] = [];
+    pageGroups[h.page].push(h);
+  });
+  const sortedPages = Object.keys(pageGroups).map(Number).sort((a, b) => a - b);
+
+  const chronological = [...highlights].reverse();
+  const getHighlightNumber = (id: string) => chronological.findIndex(h => h.id === id) + 1;
+
+  const ungradedCount = highlights.filter(h => h.marks === null).length;
+  const totalAwarded = highlights.reduce((sum, h) => sum + (h.marks ?? 0), 0);
 
   return (
     <div ref={containerRef} className="h-screen flex flex-col bg-background overflow-hidden">
       <NavBar
-        hasNotifications={openCount > 0}
+        hasNotifications={ungradedCount > 0}
         notifOpen={notifOpen}
         onNotifOpenChange={setNotifOpen}
         avatarInitials="ST"
@@ -425,20 +353,23 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages }: Vi
         }
         notificationContent={
           <>
-            <div className="p-3 border-b font-semibold text-sm">Notifications</div>
+            <div className="p-3 border-b font-semibold text-sm">Highlights needing marks</div>
             <div className="flex flex-col divide-y max-h-72 overflow-y-auto">
-              {resourceDiscussions.slice(0, 5).map(d => (
+              {highlights.filter(h => h.marks === null).length === 0 && (
+                <p className="p-3 text-xs text-muted-foreground">Everything's graded.</p>
+              )}
+              {highlights.filter(h => h.marks === null).slice(0, 5).map(h => (
                 <button
-                  key={d.id}
+                  key={h.id}
                   className="p-3 text-left hover:bg-muted/50 transition-colors w-full"
-                  onClick={() => { setExpandedThread(d.id); setNotifOpen(false); setPageFilter("all"); }}
+                  onClick={() => { setExpandedHighlight(h.id); setNotifOpen(false); setPageFilter("all"); jumpToPage(h.page); }}
                 >
                   <div className="flex items-center gap-2 mb-1">
-                    <Avatar className="h-6 w-6"><AvatarFallback className="text-[10px]">{d.user.avatar}</AvatarFallback></Avatar>
-                    <span className="font-medium text-xs">{d.user.name}</span>
-                    <span className="text-[10px] text-muted-foreground ml-auto">{d.time}</span>
+                    <Highlighter className="h-3.5 w-3.5 text-primary" />
+                    <span className="font-medium text-xs">Page {h.page}</span>
+                    <span className="text-[10px] text-muted-foreground ml-auto">{formatRelativeTime(h.createdAt)}</span>
                   </div>
-                  <p className="text-xs text-muted-foreground line-clamp-2">{d.question}</p>
+                  <p className="text-xs text-muted-foreground line-clamp-2">{h.feedback || "No feedback added yet"}</p>
                 </button>
               ))}
             </div>
@@ -447,19 +378,13 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages }: Vi
       />
 
       <div className="flex-1 flex overflow-hidden">
-        {/* Center: PDF viewer */}
+        {/* Center: scrollable PDF viewer */}
         <main className="flex-1 flex flex-col relative bg-muted/20 overflow-hidden">
           <div className="flex-none h-12 flex items-center justify-between px-4 border-b bg-background/80 backdrop-blur-sm z-10">
             <div className="flex items-center gap-1">
-              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => goToPage(-1)} disabled={currentPage <= 1}>
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
               <span className="text-xs text-muted-foreground font-medium w-28 text-center">
                 Page {currentPage} of {totalPages}
               </span>
-              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => goToPage(1)} disabled={currentPage >= totalPages}>
-                <ChevronRight className="h-4 w-4" />
-              </Button>
             </div>
             <div className="flex items-center gap-1">
               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setZoomIndex(i => Math.max(0, i - 1))} disabled={zoomIndex === 0}>
@@ -470,14 +395,14 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages }: Vi
                 <ZoomIn className="h-4 w-4" />
               </Button>
               <div className="flex items-center gap-2 px-2">
-                {showPins ? <Eye className="h-3.5 w-3.5 text-muted-foreground" /> : <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />}
-                <Label htmlFor="show-pins-toggle" className="text-xs text-muted-foreground cursor-pointer select-none">
-                  Pins
+                {showHighlights ? <Eye className="h-3.5 w-3.5 text-muted-foreground" /> : <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />}
+                <Label htmlFor="show-highlights-toggle" className="text-xs text-muted-foreground cursor-pointer select-none">
+                  Highlights
                 </Label>
                 <Switch
-                  id="show-pins-toggle"
-                  checked={showPins}
-                  onCheckedChange={setShowPins}
+                  id="show-highlights-toggle"
+                  checked={showHighlights}
+                  onCheckedChange={setShowHighlights}
                 />
               </div>
             </div>
@@ -492,7 +417,7 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages }: Vi
           </div>
 
           <AnimatePresence>
-            {placingPin && (
+            {placingHighlight && (
               <motion.div
                 initial={{ height: 0, opacity: 0 }}
                 animate={{ height: "auto", opacity: 1 }}
@@ -500,111 +425,134 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages }: Vi
                 className="bg-primary text-primary-foreground flex items-center justify-between px-4 py-2 text-sm font-medium z-20 shrink-0"
               >
                 <div className="flex items-center gap-2">
-                  <MapPin className="h-4 w-4 shrink-0" />
-                  Click anywhere on page {currentPage} to place your pin
+                  <Highlighter className="h-4 w-4 shrink-0" />
+                  Drag a box over the part of the answer you want to grade
                 </div>
-                <Button size="sm" variant="ghost" className="h-7 text-primary-foreground hover:bg-white/20" onClick={() => setPlacingPin(false)}>
+                <Button size="sm" variant="ghost" className="h-7 text-primary-foreground hover:bg-white/20" onClick={() => setPlacingHighlight(false)}>
                   <X className="h-3.5 w-3.5 mr-1" /> Cancel
                 </Button>
               </motion.div>
             )}
           </AnimatePresence>
 
-          <div className="flex-1 overflow-auto p-6 flex justify-center items-start">
-            <div
-              ref={docAreaRef}
-              className="relative"
-              style={{ width: pageWidth, maxWidth: "100%" }}
-              onClick={handleDocClick}
+          {/* Continuous scroll area — every page renders at once, stacked. */}
+          <div ref={scrollAreaRef} className="flex-1 overflow-auto p-6 flex flex-col items-center gap-6">
+            {pdfLoading && (
+              <div className="flex flex-col items-center gap-3 text-muted-foreground py-24">
+                <Loader2 className="h-8 w-8 animate-spin text-primary" />
+                <span className="text-sm">Loading document...</span>
+              </div>
+            )}
+
+            <Document
+              file={fileUrl}
+              onLoadSuccess={handleDocumentLoadSuccess}
+              onLoadError={() => setPdfLoading(false)}
+              loading=""
             >
-              {pdfLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-card z-10 rounded-sm shadow-lg" style={{ minHeight: 960 }}>
-                  <div className="flex flex-col items-center gap-3 text-muted-foreground">
-                    <Loader2 className="h-8 w-8 animate-spin text-primary" />
-                    <span className="text-sm">Loading document...</span>
-                  </div>
-                </div>
-              )}
-              <Document
-                file={fileUrl}
-                onLoadSuccess={handleDocumentLoadSuccess}
-                onLoadError={() => setPdfLoading(false)}
-                className="shadow-2xl rounded-sm overflow-hidden"
-                loading=""
-              >
-                <Page
-                  pageNumber={currentPage}
-                  width={pageWidth}
-                  renderAnnotationLayer={false}
-                  renderTextLayer={true}
-                  className="select-none"
-                />
-              </Document>
+              {numPages && Array.from({ length: numPages }, (_, i) => i + 1).map(pageNum => {
+                const pins = highlights.filter(h => h.page === pageNum);
+                const draftOnThisPage = draftRect?.page === pageNum ? draftRect.rect : null;
 
-              {placingPin && (
-                <div
-                  className="absolute inset-0 z-30 cursor-crosshair rounded-sm"
-                  style={{ background: "rgba(79,70,229,0.07)" }}
-                />
-              )}
-
-              {showPins && currentPagePins.map((disc) => {
-                if (!disc.position) return null;
-                const num = getPinNumber(disc.id);
                 return (
-                  <Popover key={disc.id}>
-                    <PopoverTrigger asChild>
-                      <button
-                        className={`absolute w-8 h-8 rounded-full border-2 border-white text-white shadow-lg flex items-center justify-center text-sm font-bold transition-transform hover:scale-110 z-20 ${
-                          disc.status === "Open" ? "bg-primary" : "bg-emerald-500"
-                        }`}
+                  <div
+                    key={pageNum}
+                    data-page={pageNum}
+                    ref={(el) => {
+                      if (el) pageRefs.current.set(pageNum, el);
+                      else pageRefs.current.delete(pageNum);
+                    }}
+                    className="relative shadow-2xl rounded-sm overflow-hidden mb-2"
+                    style={{ width: pageWidth, maxWidth: "100%", cursor: placingHighlight ? "crosshair" : "default" }}
+                    onMouseDown={handlePageMouseDown(pageNum)}
+                  >
+                    <Page
+                      pageNumber={pageNum}
+                      width={pageWidth}
+                      renderAnnotationLayer={false}
+                      renderTextLayer={true}
+                      className="select-none"
+                    />
+
+                    {placingHighlight && (
+                      <div className="absolute inset-0 z-30" style={{ background: "rgba(79,70,229,0.05)" }} />
+                    )}
+
+                    {draftOnThisPage && (
+                      <div
+                        className="absolute z-30 border-2 border-primary bg-primary/20 pointer-events-none"
                         style={{
-                          left: `calc(${disc.position.x}% - 16px)`,
-                          top: `calc(${disc.position.y}% - 16px)`,
+                          left: `${draftOnThisPage.x}%`,
+                          top: `${draftOnThisPage.y}%`,
+                          width: `${draftOnThisPage.width}%`,
+                          height: `${draftOnThisPage.height}%`,
                         }}
-                      >
-                        {num}
-                      </button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-80 p-0" align="start" side="right">
-                      <div className="p-4 border-b flex items-start gap-3 bg-muted/30">
-                        <Avatar className="h-8 w-8">
-                          <AvatarFallback className="text-xs">{disc.user.avatar}</AvatarFallback>
-                        </Avatar>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between gap-2 mb-1">
-                            <span className="font-semibold text-sm">{disc.user.name}</span>
-                            <span className="text-xs text-muted-foreground">{disc.time}</span>
-                          </div>
-                          <p className="text-sm leading-relaxed">{disc.question}</p>
-                          <div className="flex gap-2 mt-2">
-                            <Badge variant="outline" className="text-[10px] px-1.5 py-0">p. {disc.page}</Badge>
-                            <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${disc.status === "Open" ? "text-primary border-primary/30" : "text-emerald-600 border-emerald-300"}`}>
-                              {disc.status}
-                            </Badge>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="p-2 bg-background flex justify-between items-center">
-                        <span className="text-xs text-muted-foreground pl-2">{disc.replies.length} {disc.replies.length === 1 ? "reply" : "replies"}</span>
-                        <Button variant="ghost" size="sm" onClick={() => { setExpandedThread(disc.id); setPageFilter("all"); }} className="text-primary h-8">
-                          View thread
-                        </Button>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
+                      />
+                    )}
+
+                    {showHighlights && pins.map(h => {
+                      const num = getHighlightNumber(h.id);
+                      const graded = h.marks !== null;
+                      return (
+                        <Popover key={h.id}>
+                          <PopoverTrigger asChild>
+                            <button
+                              className={`absolute z-20 border-2 transition-colors ${
+                                graded ? "border-emerald-500 bg-emerald-500/15 hover:bg-emerald-500/25" : "border-primary bg-primary/15 hover:bg-primary/25"
+                              }`}
+                              style={{
+                                left: `${h.rect.x}%`,
+                                top: `${h.rect.y}%`,
+                                width: `${h.rect.width}%`,
+                                height: `${h.rect.height}%`,
+                              }}
+                            >
+                              <span
+                                className={`absolute -top-3 -left-3 w-6 h-6 rounded-full border-2 border-white text-white shadow flex items-center justify-center text-xs font-bold ${
+                                  graded ? "bg-emerald-500" : "bg-primary"
+                                }`}
+                              >
+                                {num}
+                              </span>
+                            </button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-72 p-0" align="start" side="right">
+                            <div className="p-4 border-b bg-muted/30">
+                              <div className="flex items-center justify-between gap-2 mb-1">
+                                <span className="font-semibold text-sm">Highlight #{num} · p. {h.page}</span>
+                                <Badge variant="outline" className={graded ? "text-emerald-600 border-emerald-300 text-[10px]" : "text-primary border-primary/30 text-[10px]"}>
+                                  {graded ? `${h.marks} marks` : "Ungraded"}
+                                </Badge>
+                              </div>
+                              <p className="text-sm leading-relaxed text-muted-foreground">
+                                {h.feedback || "No feedback added yet."}
+                              </p>
+                            </div>
+                            <div className="p-2 bg-background flex justify-between items-center">
+                              <Button variant="ghost" size="sm" className="h-8 text-muted-foreground" onClick={() => deleteHighlight(h.id)}>
+                                <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Delete
+                              </Button>
+                              <Button variant="ghost" size="sm" className="h-8 text-primary" onClick={() => openEditHighlight(h)}>
+                                <Pencil className="h-3.5 w-3.5 mr-1.5" /> Edit
+                              </Button>
+                            </div>
+                          </PopoverContent>
+                        </Popover>
+                      );
+                    })}
+                  </div>
                 );
               })}
-            </div>
+            </Document>
           </div>
 
           <Button
             className="absolute bottom-6 right-6 gap-2 shadow-xl rounded-full h-12 px-5"
-            onClick={() => setPlacingPin(true)}
-            disabled={placingPin}
+            onClick={() => setPlacingHighlight(v => !v)}
+            variant={placingHighlight ? "secondary" : "default"}
           >
-            <MapPin className="h-4 w-4" />
-            {placingPin ? "Click to place pin..." : "New Discussion"}
+            <Highlighter className="h-4 w-4" />
+            {placingHighlight ? "Drag on a page..." : "Add Highlight"}
           </Button>
 
           <AnimatePresence>
@@ -625,16 +573,18 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages }: Vi
           </AnimatePresence>
         </main>
 
-        {/* Right sidebar: discussions */}
+        {/* Right sidebar: grading highlights */}
         <aside className="w-80 flex-none border-l bg-card flex flex-col z-10">
           <div className="p-3 border-b flex flex-col gap-2">
             <div className="flex items-center justify-between">
-              <h2 className="font-semibold text-sm">Discussions</h2>
+              <h2 className="font-semibold text-sm">Grading</h2>
               <div className="flex items-center gap-1.5">
-                <Badge variant="secondary" className="rounded-full text-xs">{resourceDiscussions.length} total</Badge>
-                {openCount > 0 && (
+                <Badge variant="secondary" className="rounded-full text-xs">
+                  {totalAwarded}{maxMarks ? ` / ${maxMarks}` : ""} marks
+                </Badge>
+                {ungradedCount > 0 && (
                   <Badge className="rounded-full text-xs bg-primary/10 text-primary border-primary/20" variant="outline">
-                    {openCount} open
+                    {ungradedCount} ungraded
                   </Badge>
                 )}
               </div>
@@ -663,43 +613,24 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages }: Vi
 
           <ScrollArea className="flex-1">
             <div className="p-3 flex flex-col gap-3">
-              {discussionsLoading && (
-                <div className="flex items-center justify-center gap-2 text-muted-foreground text-sm py-10">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading discussions...
-                </div>
-              )}
-
-              {!discussionsLoading && discussionsError && (
-                <div className="text-center text-muted-foreground text-sm py-10 flex flex-col items-center gap-2">
-                  <AlertTriangle className="h-6 w-6 text-destructive" />
-                  <p>{discussionsError}</p>
-                </div>
-              )}
-
-              {!discussionsLoading && !discussionsError && sidebarDiscussions.length === 0 && (
+              {sidebarHighlights.length === 0 && (
                 <div className="text-center text-muted-foreground text-sm py-10 flex flex-col items-center gap-3">
-                  <MessageSquare className="h-8 w-8 opacity-30" />
+                  <Highlighter className="h-8 w-8 opacity-30" />
                   <div>
                     <p className="font-medium mb-1">
-                      {pageFilter === "current" ? `No discussions on page ${currentPage}` : "No discussions yet"}
+                      {pageFilter === "current" ? `No highlights on page ${currentPage}` : "No highlights yet"}
                     </p>
                     <p className="text-xs">
-                      {pageFilter === "current"
-                        ? "Click \"New Discussion\" and place a pin on this page."
-                        : "Be the first to start one!"}
+                      Click "Add Highlight" and drag over the answer to grade a section.
                     </p>
                   </div>
                 </div>
               )}
 
-              {!discussionsLoading && !discussionsError && pageFilter === "all"
+              {pageFilter === "all"
                 ? sortedPages.map(page => (
                     <div key={page} className="flex flex-col gap-2">
-                      <button
-                        onClick={() => jumpToPage(page)}
-                        className="flex items-center gap-2 group"
-                      >
+                      <button onClick={() => jumpToPage(page)} className="flex items-center gap-2 group">
                         <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted/60 hover:bg-muted text-xs font-semibold text-muted-foreground group-hover:text-foreground transition-colors">
                           <FileText className="h-3 w-3" />
                           Page {page}
@@ -711,87 +642,87 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages }: Vi
                         <span className="text-[10px] text-muted-foreground group-hover:text-foreground">{pageGroups[page].length}</span>
                       </button>
 
-                      {pageGroups[page].map(discussion => (
-                        <DiscussionCard
-                          key={discussion.id}
-                          discussion={discussion}
-                          expanded={expandedThread === discussion.id}
-                          onToggle={() => setExpandedThread(expandedThread === discussion.id ? null : discussion.id)}
-                          onReply={() => sendReply(discussion.id)}
-                          onMarkResolved={() => markResolved(discussion.id)}
-                          replyText={replyTexts[discussion.id] || ""}
-                          onReplyTextChange={(v) => setReplyTexts(prev => ({ ...prev, [discussion.id]: v }))}
-                          pinNumber={discussion.position ? getPinNumber(discussion.id) : undefined}
-                          onJumpToPage={() => jumpToPage(discussion.page)}
-                          replySubmitting={replySubmittingId === discussion.id}
+                      {pageGroups[page].map(h => (
+                        <HighlightCard
+                          key={h.id}
+                          highlight={h}
+                          number={getHighlightNumber(h.id)}
+                          expanded={expandedHighlight === h.id}
+                          onToggle={() => setExpandedHighlight(expandedHighlight === h.id ? null : h.id)}
+                          onEdit={() => openEditHighlight(h)}
+                          onDelete={() => deleteHighlight(h.id)}
+                          onJumpToPage={() => jumpToPage(h.page)}
                         />
                       ))}
                     </div>
                   ))
-                : !discussionsLoading && !discussionsError && sidebarDiscussions.map(discussion => (
-                    <DiscussionCard
-                      key={discussion.id}
-                      discussion={discussion}
-                      expanded={expandedThread === discussion.id}
-                      onToggle={() => setExpandedThread(expandedThread === discussion.id ? null : discussion.id)}
-                      onReply={() => sendReply(discussion.id)}
-                      onMarkResolved={() => markResolved(discussion.id)}
-                      replyText={replyTexts[discussion.id] || ""}
-                      onReplyTextChange={(v) => setReplyTexts(prev => ({ ...prev, [discussion.id]: v }))}
-                      pinNumber={discussion.position ? getPinNumber(discussion.id) : undefined}
-                      onJumpToPage={() => jumpToPage(discussion.page)}
-                      replySubmitting={replySubmittingId === discussion.id}
+                : sidebarHighlights.map(h => (
+                    <HighlightCard
+                      key={h.id}
+                      highlight={h}
+                      number={getHighlightNumber(h.id)}
+                      expanded={expandedHighlight === h.id}
+                      onToggle={() => setExpandedHighlight(expandedHighlight === h.id ? null : h.id)}
+                      onEdit={() => openEditHighlight(h)}
+                      onDelete={() => deleteHighlight(h.id)}
+                      onJumpToPage={() => jumpToPage(h.page)}
                     />
-                  ))
-              }
+                  ))}
             </div>
           </ScrollArea>
 
           <div className="p-3 border-t">
-            <Button className="w-full gap-2" variant={placingPin ? "secondary" : "default"} onClick={() => setPlacingPin(v => !v)}>
-              <MapPin className="h-4 w-4" />
-              {placingPin ? "Cancel placement" : "Pin a Discussion"}
+            <Button className="w-full gap-2" variant={placingHighlight ? "secondary" : "default"} onClick={() => setPlacingHighlight(v => !v)}>
+              <Highlighter className="h-4 w-4" />
+              {placingHighlight ? "Cancel placement" : "Add Highlight"}
             </Button>
           </div>
         </aside>
       </div>
 
-      <Dialog open={discussionDialogOpen} onOpenChange={(open) => { if (!open) { setDiscussionDialogOpen(false); setPendingPosition(null); setDiscussionSubmitError(null); } }}>
+      <Dialog open={highlightDialogOpen} onOpenChange={(open) => { if (!open) cancelHighlightDialog(); }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <MapPin className="h-4 w-4 text-primary" />
-              New discussion — Page {currentPage}
+              <Highlighter className="h-4 w-4 text-primary" />
+              {editingHighlightId ? "Edit highlight" : "New highlight"} — Page {draftRect?.page}
             </DialogTitle>
           </DialogHeader>
           <div className="flex flex-col gap-4 py-2">
             <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-md text-xs text-muted-foreground">
               <FileText className="h-3.5 w-3.5 shrink-0" />
               <span className="truncate">{title}</span>
-              <span className="shrink-0">· p. {currentPage}</span>
+              <span className="shrink-0">· p. {draftRect?.page}</span>
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="new-question">Your question or comment</Label>
+              <Label htmlFor="marks-input">Marks {maxMarks ? `(out of ${maxMarks})` : ""}</Label>
+              <Input
+                id="marks-input"
+                type="number"
+                min={0}
+                max={maxMarks}
+                placeholder="e.g. 4"
+                value={marksInput}
+                onChange={(e) => setMarksInput(e.target.value)}
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="feedback-input">Feedback</Label>
               <Textarea
-                id="new-question"
-                placeholder="What would you like to discuss about this part of the document?"
+                id="feedback-input"
+                placeholder="What's right or wrong about this part of the answer?"
                 className="resize-none"
                 rows={3}
-                value={newQuestion}
-                onChange={(e) => setNewQuestion(e.target.value)}
+                value={feedbackInput}
+                onChange={(e) => setFeedbackInput(e.target.value)}
                 autoFocus
-                onKeyDown={(e) => { if (e.key === "Enter" && e.ctrlKey) submitDiscussion(); }}
               />
-              <p className="text-[11px] text-muted-foreground">Press Ctrl+Enter to post</p>
-              {discussionSubmitError && (
-                <p className="text-[11px] text-destructive">{discussionSubmitError}</p>
-              )}
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setDiscussionDialogOpen(false); setPendingPosition(null); setDiscussionSubmitError(null); }}>Cancel</Button>
-            <Button onClick={submitDiscussion} disabled={!newQuestion.trim() || submittingDiscussion}>
-              {submittingDiscussion ? "Posting..." : "Post Discussion"}
+            <Button variant="outline" onClick={cancelHighlightDialog}>Cancel</Button>
+            <Button onClick={saveHighlight}>
+              {editingHighlightId ? "Save changes" : "Save highlight"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -800,58 +731,46 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages }: Vi
   );
 }
 
-interface DiscussionCardProps {
-  discussion: Discussion;
+interface HighlightCardProps {
+  highlight: Highlight;
+  number: number;
   expanded: boolean;
   onToggle: () => void;
-  onReply: () => void;
-  onMarkResolved: () => void;
-  replyText: string;
-  onReplyTextChange: (v: string) => void;
-  pinNumber?: number;
+  onEdit: () => void;
+  onDelete: () => void;
   onJumpToPage: () => void;
-  replySubmitting: boolean;
 }
 
-function DiscussionCard({ discussion, expanded, onToggle, onReply, onMarkResolved, replyText, onReplyTextChange, pinNumber, onJumpToPage, replySubmitting }: DiscussionCardProps) {
+function HighlightCard({ highlight, number, expanded, onToggle, onEdit, onDelete, onJumpToPage }: HighlightCardProps) {
+  const graded = highlight.marks !== null;
   return (
     <Card
       className={`overflow-hidden transition-all duration-200 border-l-4 ${
-        discussion.status === "Open" ? "border-l-primary" : "border-l-emerald-500/50"
+        graded ? "border-l-emerald-500/50" : "border-l-primary"
       } ${expanded ? "ring-1 ring-primary/20 shadow-md" : "hover:border-l-primary/60"}`}
     >
       <div className="p-3 cursor-pointer flex flex-col gap-2" onClick={onToggle}>
         <div className="flex justify-between items-start gap-2">
           <div className="flex items-center gap-2">
-            {pinNumber !== undefined && (
-              <span className={`w-5 h-5 rounded-full text-white text-[10px] font-bold flex items-center justify-center shrink-0 ${discussion.status === "Open" ? "bg-primary" : "bg-emerald-500"}`}>
-                {pinNumber}
-              </span>
-            )}
-            <Avatar className="h-6 w-6">
-              <AvatarFallback className="text-[10px]">{discussion.user.avatar}</AvatarFallback>
-            </Avatar>
-            <span className="text-sm font-medium">{discussion.user.name}</span>
+            <span className={`w-5 h-5 rounded-full text-white text-[10px] font-bold flex items-center justify-center shrink-0 ${graded ? "bg-emerald-500" : "bg-primary"}`}>
+              {number}
+            </span>
+            <span className="text-sm font-medium">Highlight #{number}</span>
           </div>
-          <span className="text-xs text-muted-foreground whitespace-nowrap">{discussion.time}</span>
+          <span className="text-xs text-muted-foreground whitespace-nowrap">{formatRelativeTime(highlight.createdAt)}</span>
         </div>
-        <p className="text-sm leading-relaxed text-muted-foreground line-clamp-2">{discussion.question}</p>
+        <p className="text-sm leading-relaxed text-muted-foreground line-clamp-2">
+          {highlight.feedback || "No feedback added yet."}
+        </p>
         <div className="flex items-center justify-between">
           <div className="flex gap-1.5 items-center">
-            <button onClick={(e) => { e.stopPropagation(); onMarkResolved(); }}>
-              {discussion.status === "Open" ? (
-                <Badge variant="outline" className="text-[10px] text-primary bg-primary/5 border-primary/20 flex gap-1 items-center px-1.5 py-0 cursor-pointer hover:bg-primary/10">
-                  <Circle className="w-2 h-2 fill-current" /> Open
-                </Badge>
-              ) : (
-                <Badge variant="outline" className="text-[10px] text-emerald-600 border-emerald-300 flex gap-1 items-center px-1.5 py-0 cursor-pointer hover:bg-emerald-50 dark:hover:bg-emerald-950/30">
-                  <CheckCircle2 className="w-3 h-3" /> Resolved
-                </Badge>
-              )}
-            </button>
-            {discussion.replies.length > 0 && (
-              <Badge variant="secondary" className="text-[10px] flex gap-1 items-center px-1.5 py-0">
-                <MessageSquare className="w-3 h-3" /> {discussion.replies.length}
+            {graded ? (
+              <Badge variant="outline" className="text-[10px] text-emerald-600 border-emerald-300 flex gap-1 items-center px-1.5 py-0">
+                <CheckCircle2 className="w-3 h-3" /> {highlight.marks} marks
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="text-[10px] text-primary bg-primary/5 border-primary/20 px-1.5 py-0">
+                Ungraded
               </Badge>
             )}
           </div>
@@ -859,7 +778,7 @@ function DiscussionCard({ discussion, expanded, onToggle, onReply, onMarkResolve
             onClick={(e) => { e.stopPropagation(); onJumpToPage(); }}
             className="text-[10px] text-muted-foreground hover:text-primary transition-colors px-1.5 py-0.5 rounded border border-transparent hover:border-primary/20 hover:bg-primary/5"
           >
-            p. {discussion.page}
+            p. {highlight.page}
           </button>
         </div>
       </div>
@@ -872,37 +791,13 @@ function DiscussionCard({ discussion, expanded, onToggle, onReply, onMarkResolve
             transition={{ duration: 0.2 }}
             className="border-t bg-muted/10"
           >
-            <div className="p-3 flex flex-col gap-3">
-              {discussion.replies.length === 0 && (
-                <p className="text-xs text-center text-muted-foreground py-2 italic">No replies yet. Be the first!</p>
-              )}
-              {discussion.replies.map((reply, i) => (
-                <div key={i} className="flex gap-2">
-                  <Avatar className="h-6 w-6 shrink-0 mt-0.5">
-                    <AvatarFallback className="text-[10px]">{reply.user.avatar}</AvatarFallback>
-                  </Avatar>
-                  <div className="flex-1 bg-background border rounded-md p-2.5 shadow-sm">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-medium text-xs">{reply.user.name}</span>
-                      <span className="text-[10px] text-muted-foreground">{reply.time}</span>
-                    </div>
-                    <p className="text-muted-foreground text-xs leading-relaxed">{reply.message}</p>
-                  </div>
-                </div>
-              ))}
-              <div className="flex gap-2 mt-1">
-                <Input
-                  placeholder="Reply to thread..."
-                  className="h-8 text-xs bg-background"
-                  value={replyText}
-                  onChange={(e) => onReplyTextChange(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onReply(); } }}
-                  disabled={replySubmitting}
-                />
-                <Button size="icon" className="h-8 w-8 shrink-0" onClick={onReply} disabled={!replyText.trim() || replySubmitting}>
-                  {replySubmitting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
-                </Button>
-              </div>
+            <div className="p-3 flex items-center justify-between gap-2">
+              <Button variant="ghost" size="sm" className="h-8 text-muted-foreground" onClick={onDelete}>
+                <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Delete
+              </Button>
+              <Button variant="outline" size="sm" className="h-8" onClick={onEdit}>
+                <Pencil className="h-3.5 w-3.5 mr-1.5" /> Edit marks & feedback
+              </Button>
             </div>
           </motion.div>
         )}
