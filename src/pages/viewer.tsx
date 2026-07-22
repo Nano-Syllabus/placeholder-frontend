@@ -13,11 +13,12 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
   Download, Maximize, Minimize, ZoomIn, ZoomOut,
-  Highlighter, CheckCircle2, FileText, X, Loader2, Layers, Eye, EyeOff, Pencil, Trash2, ChevronRight
+  Highlighter, CheckCircle2, FileText, X, Loader2, Layers, Eye, EyeOff, Pencil, Trash2, ChevronRight, Clock
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { motion, AnimatePresence } from "framer-motion";
 import { NavBar } from "@/components/Dashboard-viewer-navbar";
+import { authFetch } from "@/lib/auth-context";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
 
@@ -46,16 +47,35 @@ export interface ViewerProps {
   pages?: number;
   /** Optional max marks for this document, shown next to the running total. */
   maxMarks?: number;
+  /**
+   * Exam mode — strips out all grading/highlight UI (sidebar, highlight
+   * placement, bell notifications) so a student sees a bare, read-only
+   * question paper. Also skips fetching highlights entirely.
+   */
+  examMode?: boolean;
+  /**
+   * ISO timestamp the student's attempt expires. When set together with
+   * examMode, drives an in-viewer countdown and locks the viewer behind
+   * an overlay once time runs out.
+   */
+  attemptExpiresAt?: string;
+  /** Fires once, the instant the countdown hits zero (or the user taps
+   *  "Back to Assessments" on the lock overlay). */
+  onExamExpire?: () => void;
 }
 
 // ---------------------------------------------------------------------------
 // Grading highlights — replaces the old discussion/pin threads. A highlight
 // is a dragged rectangle on a page with an attached mark + feedback comment.
 //
-// NOTE: this is local component state only for now (no backend call), same
-// as the earlier static "Questions" feature — wire up a persistence endpoint
-// here if you want highlights to survive a refresh / be visible to both
-// teacher and student.
+// Persisted via GET/POST /questions/submissions/:submissionId/highlights and
+// PATCH/DELETE /questions/highlights/:highlightId. `resourceId` is used as
+// the submissionId here — only meaningful when this Viewer is opened for a
+// student's submission (see ViewerPage's fallback lookup). If opened for a
+// plain course resource, the highlights fetch will simply 404 / return
+// nothing and the grading UI has no effect. In examMode, highlights are
+// never fetched at all — a student reading the question paper has no
+// business hitting the grading endpoint.
 // ---------------------------------------------------------------------------
 
 interface HighlightRect {
@@ -72,6 +92,26 @@ interface Highlight {
   marks: number | null;
   feedback: string;
   createdAt: string;
+}
+
+interface HighlightRecord {
+  _id: string;
+  page: number;
+  rect: HighlightRect;
+  marks: number | null;
+  feedback: string;
+  createdAt?: string;
+}
+
+function toHighlightView(record: HighlightRecord): Highlight {
+  return {
+    id: record._id,
+    page: record.page,
+    rect: record.rect,
+    marks: record.marks,
+    feedback: record.feedback ?? "",
+    createdAt: record.createdAt ?? new Date().toISOString(),
+  };
 }
 
 function formatRelativeTime(dateString?: string): string {
@@ -96,8 +136,21 @@ function normalizeRect(a: { x: number; y: number }, b: { x: number; y: number })
   return { x, y, width, height };
 }
 
-export default function Viewer({ resourceId, fileUrl, title, course, pages, maxMarks }: ViewerProps) {
+// Countdown formatter for the exam-mode badge/overlay — mm:ss, floored at 0.
+function formatExamRemaining(ms: number) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const mm = Math.floor(total / 60).toString().padStart(2, "0");
+  const ss = (total % 60).toString().padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+export default function Viewer({
+  resourceId, fileUrl, title, course, pages, maxMarks,
+  examMode = false, attemptExpiresAt, onExamExpire,
+}: ViewerProps) {
   const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [highlightsLoading, setHighlightsLoading] = useState(false);
+  const [highlightsError, setHighlightsError] = useState<string | null>(null);
   const [expandedHighlight, setExpandedHighlight] = useState<string | null>(null);
 
   const [currentPage, setCurrentPage] = useState(1);
@@ -128,6 +181,38 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
   const zoomLevel = ZOOM_LEVELS[zoomIndex];
   const pageWidth = (zoomLevel / 100) * BASE_PAGE_WIDTH;
 
+  // ---------------------------------------------------------------------
+  // Exam-mode countdown — recomputed every second from wall-clock time
+  // (never counted down independently client-side), so a tab left open
+  // still shows the correct expired state on the next tick. Fires
+  // onExamExpire exactly once when time runs out.
+  // ---------------------------------------------------------------------
+  const [examNow, setExamNow] = useState(Date.now());
+  const [examExpired, setExamExpired] = useState(false);
+  const examExpireFiredRef = useRef(false);
+
+  useEffect(() => {
+    if (!examMode || !attemptExpiresAt) return;
+    setExamNow(Date.now());
+    setExamExpired(false);
+    examExpireFiredRef.current = false;
+    const id = setInterval(() => setExamNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [examMode, attemptExpiresAt]);
+
+  const examRemainingMs = examMode && attemptExpiresAt
+    ? new Date(attemptExpiresAt).getTime() - examNow
+    : null;
+
+  useEffect(() => {
+    if (examRemainingMs === null) return;
+    if (examRemainingMs <= 0 && !examExpireFiredRef.current) {
+      examExpireFiredRef.current = true;
+      setExamExpired(true);
+      onExamExpire?.();
+    }
+  }, [examRemainingMs, onExamExpire]);
+
   // Reset viewer state whenever the resource identity changes.
   useEffect(() => {
     setCurrentPage(1);
@@ -136,9 +221,46 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
     setExpandedHighlight(null);
     setPlacingHighlight(false);
     setPageFilter("all");
-    setHighlights([]);
     pageRefs.current.clear();
   }, [resourceId, fileUrl]);
+
+  // GET /questions/submissions/:submissionId/highlights — resourceId is
+  // treated as the submission id here. Skipped entirely in exam mode.
+  useEffect(() => {
+    if (!resourceId || examMode) {
+      setHighlights([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      setHighlightsLoading(true);
+      setHighlightsError(null);
+      try {
+        const res = await authFetch(`/questions/submissions/${resourceId}/highlights`, { method: "GET" });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.message ?? `Request failed with status ${res.status}`);
+        }
+        const payload = await res.json();
+        const records: HighlightRecord[] = payload?.data ?? [];
+        if (cancelled) return;
+        setHighlights(records.map(toHighlightView));
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Failed to load highlights:", err);
+        setHighlightsError(err instanceof Error ? err.message : "Failed to load highlights");
+        setHighlights([]);
+      } finally {
+        if (!cancelled) setHighlightsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [resourceId, examMode]);
 
   const handleDocumentLoadSuccess = ({ numPages: n }: { numPages: number }) => {
     setNumPages(n);
@@ -203,7 +325,7 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
   // -------------------------------------------------------------------
   // Drag-to-highlight — mousedown on a page starts the drag, mousemove
   // (attached to window while dragging) updates the rect, mouseup finalizes
-  // it and opens the marks/feedback dialog.
+  // it and opens the marks/feedback dialog. Disabled entirely in exam mode.
   // -------------------------------------------------------------------
 
   const pointFromEvent = (page: number, clientX: number, clientY: number) => {
@@ -217,7 +339,7 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
   };
 
   const handlePageMouseDown = (page: number) => (e: React.MouseEvent) => {
-    if (!placingHighlight) return;
+    if (examMode || !placingHighlight) return;
     const start = pointFromEvent(page, e.clientX, e.clientY);
     if (!start) return;
     dragStateRef.current = { page, start };
@@ -271,44 +393,80 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
     setHighlightDialogOpen(true);
   };
 
-  const saveHighlight = () => {
+  const [savingHighlight, setSavingHighlight] = useState(false);
+  const [highlightSaveError, setHighlightSaveError] = useState<string | null>(null);
+
+  const saveHighlight = async () => {
     if (!draftRect) return;
     const parsedMarks = marksInput.trim() === "" ? null : Number(marksInput);
     const marks = parsedMarks !== null && Number.isFinite(parsedMarks) ? parsedMarks : null;
+    const feedback = feedbackInput.trim();
 
-    if (editingHighlightId) {
-      setHighlights(prev =>
-        prev.map(h => (h.id === editingHighlightId ? { ...h, marks, feedback: feedbackInput.trim() } : h))
-      );
-    } else {
-      const created: Highlight = {
-        id: `h-${Date.now()}`,
-        page: draftRect.page,
-        rect: draftRect.rect,
-        marks,
-        feedback: feedbackInput.trim(),
-        createdAt: new Date().toISOString(),
-      };
-      setHighlights(prev => [created, ...prev]);
-      setExpandedHighlight(created.id);
+    setSavingHighlight(true);
+    setHighlightSaveError(null);
+
+    try {
+      if (editingHighlightId) {
+        // PATCH /questions/highlights/:highlightId
+        const res = await authFetch(`/questions/highlights/${editingHighlightId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ marks, feedback }),
+        });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(payload?.message ?? `Request failed with status ${res.status}`);
+        const updated = toHighlightView(payload.data);
+        setHighlights(prev => prev.map(h => (h.id === updated.id ? updated : h)));
+      } else {
+        // POST /questions/submissions/:submissionId/highlights
+        const res = await authFetch(`/questions/submissions/${resourceId}/highlights`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ page: draftRect.page, rect: draftRect.rect, marks, feedback }),
+        });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(payload?.message ?? `Request failed with status ${res.status}`);
+        const created = toHighlightView(payload.data);
+        setHighlights(prev => [created, ...prev]);
+        setExpandedHighlight(created.id);
+      }
+
+      setHighlightDialogOpen(false);
+      setDraftRect(null);
+      setEditingHighlightId(null);
+      setMarksInput("");
+      setFeedbackInput("");
+    } catch (err) {
+      console.error("Failed to save highlight:", err);
+      setHighlightSaveError(err instanceof Error ? err.message : "Failed to save highlight");
+    } finally {
+      setSavingHighlight(false);
     }
-
-    setHighlightDialogOpen(false);
-    setDraftRect(null);
-    setEditingHighlightId(null);
-    setMarksInput("");
-    setFeedbackInput("");
   };
 
-  const deleteHighlight = (id: string) => {
+  const deleteHighlight = async (id: string) => {
+    // Optimistic removal, with rollback on failure.
+    const previous = highlights;
     setHighlights(prev => prev.filter(h => h.id !== id));
     if (expandedHighlight === id) setExpandedHighlight(null);
+
+    try {
+      const res = await authFetch(`/questions/highlights/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.message ?? `Request failed with status ${res.status}`);
+      }
+    } catch (err) {
+      console.error("Failed to delete highlight:", err);
+      setHighlights(previous);
+    }
   };
 
   const cancelHighlightDialog = () => {
     setHighlightDialogOpen(false);
     setDraftRect(null);
     setEditingHighlightId(null);
+    setHighlightSaveError(null);
   };
 
   // -------------------------------------------------------------------
@@ -330,10 +488,15 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
   const ungradedCount = highlights.filter(h => h.marks === null).length;
   const totalAwarded = highlights.reduce((sum, h) => sum + (h.marks ?? 0), 0);
 
+  // In exam mode, once expired, block all interaction with the paper itself
+  // (in addition to the full-screen overlay below) as a second line of
+  // defense against stray clicks/drags on the page surface.
+  const examLocked = examMode && examExpired;
+
   return (
     <div ref={containerRef} className="h-screen flex flex-col bg-background overflow-hidden">
       <NavBar
-        hasNotifications={ungradedCount > 0}
+        hasNotifications={!examMode && ungradedCount > 0}
         notifOpen={notifOpen}
         onNotifOpenChange={setNotifOpen}
         avatarInitials="ST"
@@ -349,6 +512,11 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
               </>
             )}
             <span className="text-foreground font-medium truncate max-w-[220px]">{title}</span>
+            {examMode && (
+              <Badge variant="outline" className="ml-2 text-[10px] text-primary border-primary/30">
+                Exam mode
+              </Badge>
+            )}
           </div>
         }
         notificationContent={
@@ -394,19 +562,31 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setZoomIndex(i => Math.min(ZOOM_LEVELS.length - 1, i + 1))} disabled={zoomIndex === ZOOM_LEVELS.length - 1}>
                 <ZoomIn className="h-4 w-4" />
               </Button>
-              <div className="flex items-center gap-2 px-2">
-                {showHighlights ? <Eye className="h-3.5 w-3.5 text-muted-foreground" /> : <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />}
-                <Label htmlFor="show-highlights-toggle" className="text-xs text-muted-foreground cursor-pointer select-none">
-                  Highlights
-                </Label>
-                <Switch
-                  id="show-highlights-toggle"
-                  checked={showHighlights}
-                  onCheckedChange={setShowHighlights}
-                />
-              </div>
+              {!examMode && (
+                <div className="flex items-center gap-2 px-2">
+                  {showHighlights ? <Eye className="h-3.5 w-3.5 text-muted-foreground" /> : <EyeOff className="h-3.5 w-3.5 text-muted-foreground" />}
+                  <Label htmlFor="show-highlights-toggle" className="text-xs text-muted-foreground cursor-pointer select-none">
+                    Highlights
+                  </Label>
+                  <Switch
+                    id="show-highlights-toggle"
+                    checked={showHighlights}
+                    onCheckedChange={setShowHighlights}
+                  />
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-1">
+              {examMode && attemptExpiresAt && (
+                <span
+                  className={`flex items-center gap-1.5 font-mono text-xs font-medium mr-2 ${
+                    examRemainingMs !== null && examRemainingMs < 5 * 60 * 1000 ? "text-destructive" : "text-foreground"
+                  }`}
+                >
+                  <Clock className="h-3.5 w-3.5" />
+                  {examRemainingMs !== null && examRemainingMs > 0 ? formatExamRemaining(examRemainingMs) : "00:00"}
+                </span>
+              )}
               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleDownload}>
                 <Download className="h-4 w-4" />
               </Button>
@@ -416,24 +596,26 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
             </div>
           </div>
 
-          <AnimatePresence>
-            {placingHighlight && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: "auto", opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                className="bg-primary text-primary-foreground flex items-center justify-between px-4 py-2 text-sm font-medium z-20 shrink-0"
-              >
-                <div className="flex items-center gap-2">
-                  <Highlighter className="h-4 w-4 shrink-0" />
-                  Drag a box over the part of the answer you want to grade
-                </div>
-                <Button size="sm" variant="ghost" className="h-7 text-primary-foreground hover:bg-white/20" onClick={() => setPlacingHighlight(false)}>
-                  <X className="h-3.5 w-3.5 mr-1" /> Cancel
-                </Button>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          {!examMode && (
+            <AnimatePresence>
+              {placingHighlight && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  className="bg-primary text-primary-foreground flex items-center justify-between px-4 py-2 text-sm font-medium z-20 shrink-0"
+                >
+                  <div className="flex items-center gap-2">
+                    <Highlighter className="h-4 w-4 shrink-0" />
+                    Drag a box over the part of the answer you want to grade
+                  </div>
+                  <Button size="sm" variant="ghost" className="h-7 text-primary-foreground hover:bg-white/20" onClick={() => setPlacingHighlight(false)}>
+                    <X className="h-3.5 w-3.5 mr-1" /> Cancel
+                  </Button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          )}
 
           {/* Continuous scroll area — every page renders at once, stacked. */}
           <div ref={scrollAreaRef} className="flex-1 overflow-auto p-6 flex flex-col items-center gap-6">
@@ -451,8 +633,8 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
               loading=""
             >
               {numPages && Array.from({ length: numPages }, (_, i) => i + 1).map(pageNum => {
-                const pins = highlights.filter(h => h.page === pageNum);
-                const draftOnThisPage = draftRect?.page === pageNum ? draftRect.rect : null;
+                const pins = examMode ? [] : highlights.filter(h => h.page === pageNum);
+                const draftOnThisPage = !examMode && draftRect?.page === pageNum ? draftRect.rect : null;
 
                 return (
                   <div
@@ -463,7 +645,7 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
                       else pageRefs.current.delete(pageNum);
                     }}
                     className="relative shadow-2xl rounded-sm overflow-hidden mb-2"
-                    style={{ width: pageWidth, maxWidth: "100%", cursor: placingHighlight ? "crosshair" : "default" }}
+                    style={{ width: pageWidth, maxWidth: "100%", cursor: !examMode && placingHighlight ? "crosshair" : "default" }}
                     onMouseDown={handlePageMouseDown(pageNum)}
                   >
                     <Page
@@ -474,7 +656,7 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
                       className="select-none"
                     />
 
-                    {placingHighlight && (
+                    {!examMode && placingHighlight && (
                       <div className="absolute inset-0 z-30" style={{ background: "rgba(79,70,229,0.05)" }} />
                     )}
 
@@ -490,7 +672,7 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
                       />
                     )}
 
-                    {showHighlights && pins.map(h => {
+                    {!examMode && showHighlights && pins.map(h => {
                       const num = getHighlightNumber(h.id);
                       const graded = h.marks !== null;
                       return (
@@ -546,14 +728,16 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
             </Document>
           </div>
 
-          <Button
-            className="absolute bottom-6 right-6 gap-2 shadow-xl rounded-full h-12 px-5"
-            onClick={() => setPlacingHighlight(v => !v)}
-            variant={placingHighlight ? "secondary" : "default"}
-          >
-            <Highlighter className="h-4 w-4" />
-            {placingHighlight ? "Drag on a page..." : "Add Highlight"}
-          </Button>
+          {!examMode && (
+            <Button
+              className="absolute bottom-6 right-6 gap-2 shadow-xl rounded-full h-12 px-5"
+              onClick={() => setPlacingHighlight(v => !v)}
+              variant={placingHighlight ? "secondary" : "default"}
+            >
+              <Highlighter className="h-4 w-4" />
+              {placingHighlight ? "Drag on a page..." : "Add Highlight"}
+            </Button>
+          )}
 
           <AnimatePresence>
             {downloadToast && (
@@ -571,162 +755,196 @@ export default function Viewer({ resourceId, fileUrl, title, course, pages, maxM
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* Exam lock overlay — appears the instant the countdown hits
+              zero, sits above everything in this pane, and blocks further
+              interaction with the paper. */}
+          {examLocked && (
+            <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-background/95 backdrop-blur-sm text-center px-6">
+              <Clock className="h-10 w-10 text-destructive" />
+              <div>
+                <h2 className="text-lg font-semibold">Time's up</h2>
+                <p className="mt-1 text-sm text-muted-foreground max-w-sm">
+                  Your exam window has closed. If you still need to submit your answer sheet, head back to Assessments now.
+                </p>
+              </div>
+              <Button onClick={() => onExamExpire?.()}>Back to Assessments</Button>
+            </div>
+          )}
         </main>
 
-        {/* Right sidebar: grading highlights */}
-        <aside className="w-80 flex-none border-l bg-card flex flex-col z-10">
-          <div className="p-3 border-b flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <h2 className="font-semibold text-sm">Grading</h2>
-              <div className="flex items-center gap-1.5">
-                <Badge variant="secondary" className="rounded-full text-xs">
-                  {totalAwarded}{maxMarks ? ` / ${maxMarks}` : ""} marks
-                </Badge>
-                {ungradedCount > 0 && (
-                  <Badge className="rounded-full text-xs bg-primary/10 text-primary border-primary/20" variant="outline">
-                    {ungradedCount} ungraded
+        {/* Right sidebar: grading highlights — hidden entirely in exam mode */}
+        {!examMode && (
+          <aside className="w-80 flex-none border-l bg-card flex flex-col z-10">
+            <div className="p-3 border-b flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <h2 className="font-semibold text-sm">Grading</h2>
+                <div className="flex items-center gap-1.5">
+                  <Badge variant="secondary" className="rounded-full text-xs">
+                    {totalAwarded}{maxMarks ? ` / ${maxMarks}` : ""} marks
                   </Badge>
+                  {ungradedCount > 0 && (
+                    <Badge className="rounded-full text-xs bg-primary/10 text-primary border-primary/20" variant="outline">
+                      {ungradedCount} ungraded
+                    </Badge>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-1 bg-muted rounded-md p-0.5">
+                <button
+                  className={`flex-1 text-xs py-1 px-2 rounded transition-colors font-medium flex items-center justify-center gap-1.5 ${
+                    pageFilter === "all" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  onClick={() => setPageFilter("all")}
+                >
+                  <Layers className="h-3 w-3" />
+                  All pages
+                </button>
+                <button
+                  className={`flex-1 text-xs py-1 px-2 rounded transition-colors font-medium flex items-center justify-center gap-1.5 ${
+                    pageFilter === "current" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  onClick={() => setPageFilter("current")}
+                >
+                  <FileText className="h-3 w-3" />
+                  Page {currentPage}
+                </button>
+              </div>
+            </div>
+
+            <ScrollArea className="flex-1">
+              <div className="p-3 flex flex-col gap-3">
+                {highlightsLoading && (
+                  <div className="flex items-center justify-center gap-2 text-muted-foreground text-sm py-10">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Loading highlights...
+                  </div>
+                )}
+
+                {!highlightsLoading && highlightsError && (
+                  <p className="text-center text-sm text-destructive py-10">{highlightsError}</p>
+                )}
+
+                {!highlightsLoading && !highlightsError && sidebarHighlights.length === 0 && (
+                  <div className="text-center text-muted-foreground text-sm py-10 flex flex-col items-center gap-3">
+                    <Highlighter className="h-8 w-8 opacity-30" />
+                    <div>
+                      <p className="font-medium mb-1">
+                        {pageFilter === "current" ? `No highlights on page ${currentPage}` : "No highlights yet"}
+                      </p>
+                      <p className="text-xs">
+                        Click "Add Highlight" and drag over the answer to grade a section.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {!highlightsLoading && !highlightsError && (pageFilter === "all"
+                  ? sortedPages.map(page => (
+                      <div key={page} className="flex flex-col gap-2">
+                        <button onClick={() => jumpToPage(page)} className="flex items-center gap-2 group">
+                          <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted/60 hover:bg-muted text-xs font-semibold text-muted-foreground group-hover:text-foreground transition-colors">
+                            <FileText className="h-3 w-3" />
+                            Page {page}
+                            {page === currentPage && (
+                              <span className="ml-1 text-[10px] text-primary font-medium">← current</span>
+                            )}
+                          </div>
+                          <div className="flex-1 h-px bg-border" />
+                          <span className="text-[10px] text-muted-foreground group-hover:text-foreground">{pageGroups[page].length}</span>
+                        </button>
+
+                        {pageGroups[page].map(h => (
+                          <HighlightCard
+                            key={h.id}
+                            highlight={h}
+                            number={getHighlightNumber(h.id)}
+                            expanded={expandedHighlight === h.id}
+                            onToggle={() => setExpandedHighlight(expandedHighlight === h.id ? null : h.id)}
+                            onEdit={() => openEditHighlight(h)}
+                            onDelete={() => deleteHighlight(h.id)}
+                            onJumpToPage={() => jumpToPage(h.page)}
+                          />
+                        ))}
+                      </div>
+                    ))
+                  : sidebarHighlights.map(h => (
+                      <HighlightCard
+                        key={h.id}
+                        highlight={h}
+                        number={getHighlightNumber(h.id)}
+                        expanded={expandedHighlight === h.id}
+                        onToggle={() => setExpandedHighlight(expandedHighlight === h.id ? null : h.id)}
+                        onEdit={() => openEditHighlight(h)}
+                        onDelete={() => deleteHighlight(h.id)}
+                        onJumpToPage={() => jumpToPage(h.page)}
+                      />
+                    )))}
+              </div>
+            </ScrollArea>
+
+            <div className="p-3 border-t">
+              <Button className="w-full gap-2" variant={placingHighlight ? "secondary" : "default"} onClick={() => setPlacingHighlight(v => !v)}>
+                <Highlighter className="h-4 w-4" />
+                {placingHighlight ? "Cancel placement" : "Add Highlight"}
+              </Button>
+            </div>
+          </aside>
+        )}
+      </div>
+
+      {!examMode && (
+        <Dialog open={highlightDialogOpen} onOpenChange={(open) => { if (!open) cancelHighlightDialog(); }}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Highlighter className="h-4 w-4 text-primary" />
+                {editingHighlightId ? "Edit highlight" : "New highlight"} — Page {draftRect?.page}
+              </DialogTitle>
+            </DialogHeader>
+            <div className="flex flex-col gap-4 py-2">
+              <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-md text-xs text-muted-foreground">
+                <FileText className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{title}</span>
+                <span className="shrink-0">· p. {draftRect?.page}</span>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="marks-input">Marks {maxMarks ? `(out of ${maxMarks})` : ""}</Label>
+                <Input
+                  id="marks-input"
+                  type="number"
+                  min={0}
+                  max={maxMarks}
+                  placeholder="e.g. 4"
+                  value={marksInput}
+                  onChange={(e) => setMarksInput(e.target.value)}
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="feedback-input">Feedback</Label>
+                <Textarea
+                  id="feedback-input"
+                  placeholder="What's right or wrong about this part of the answer?"
+                  className="resize-none"
+                  rows={3}
+                  value={feedbackInput}
+                  onChange={(e) => setFeedbackInput(e.target.value)}
+                  autoFocus
+                />
+                {highlightSaveError && (
+                  <p className="text-xs text-destructive">{highlightSaveError}</p>
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-1 bg-muted rounded-md p-0.5">
-              <button
-                className={`flex-1 text-xs py-1 px-2 rounded transition-colors font-medium flex items-center justify-center gap-1.5 ${
-                  pageFilter === "all" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
-                }`}
-                onClick={() => setPageFilter("all")}
-              >
-                <Layers className="h-3 w-3" />
-                All pages
-              </button>
-              <button
-                className={`flex-1 text-xs py-1 px-2 rounded transition-colors font-medium flex items-center justify-center gap-1.5 ${
-                  pageFilter === "current" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
-                }`}
-                onClick={() => setPageFilter("current")}
-              >
-                <FileText className="h-3 w-3" />
-                Page {currentPage}
-              </button>
-            </div>
-          </div>
-
-          <ScrollArea className="flex-1">
-            <div className="p-3 flex flex-col gap-3">
-              {sidebarHighlights.length === 0 && (
-                <div className="text-center text-muted-foreground text-sm py-10 flex flex-col items-center gap-3">
-                  <Highlighter className="h-8 w-8 opacity-30" />
-                  <div>
-                    <p className="font-medium mb-1">
-                      {pageFilter === "current" ? `No highlights on page ${currentPage}` : "No highlights yet"}
-                    </p>
-                    <p className="text-xs">
-                      Click "Add Highlight" and drag over the answer to grade a section.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {pageFilter === "all"
-                ? sortedPages.map(page => (
-                    <div key={page} className="flex flex-col gap-2">
-                      <button onClick={() => jumpToPage(page)} className="flex items-center gap-2 group">
-                        <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted/60 hover:bg-muted text-xs font-semibold text-muted-foreground group-hover:text-foreground transition-colors">
-                          <FileText className="h-3 w-3" />
-                          Page {page}
-                          {page === currentPage && (
-                            <span className="ml-1 text-[10px] text-primary font-medium">← current</span>
-                          )}
-                        </div>
-                        <div className="flex-1 h-px bg-border" />
-                        <span className="text-[10px] text-muted-foreground group-hover:text-foreground">{pageGroups[page].length}</span>
-                      </button>
-
-                      {pageGroups[page].map(h => (
-                        <HighlightCard
-                          key={h.id}
-                          highlight={h}
-                          number={getHighlightNumber(h.id)}
-                          expanded={expandedHighlight === h.id}
-                          onToggle={() => setExpandedHighlight(expandedHighlight === h.id ? null : h.id)}
-                          onEdit={() => openEditHighlight(h)}
-                          onDelete={() => deleteHighlight(h.id)}
-                          onJumpToPage={() => jumpToPage(h.page)}
-                        />
-                      ))}
-                    </div>
-                  ))
-                : sidebarHighlights.map(h => (
-                    <HighlightCard
-                      key={h.id}
-                      highlight={h}
-                      number={getHighlightNumber(h.id)}
-                      expanded={expandedHighlight === h.id}
-                      onToggle={() => setExpandedHighlight(expandedHighlight === h.id ? null : h.id)}
-                      onEdit={() => openEditHighlight(h)}
-                      onDelete={() => deleteHighlight(h.id)}
-                      onJumpToPage={() => jumpToPage(h.page)}
-                    />
-                  ))}
-            </div>
-          </ScrollArea>
-
-          <div className="p-3 border-t">
-            <Button className="w-full gap-2" variant={placingHighlight ? "secondary" : "default"} onClick={() => setPlacingHighlight(v => !v)}>
-              <Highlighter className="h-4 w-4" />
-              {placingHighlight ? "Cancel placement" : "Add Highlight"}
-            </Button>
-          </div>
-        </aside>
-      </div>
-
-      <Dialog open={highlightDialogOpen} onOpenChange={(open) => { if (!open) cancelHighlightDialog(); }}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Highlighter className="h-4 w-4 text-primary" />
-              {editingHighlightId ? "Edit highlight" : "New highlight"} — Page {draftRect?.page}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="flex flex-col gap-4 py-2">
-            <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-md text-xs text-muted-foreground">
-              <FileText className="h-3.5 w-3.5 shrink-0" />
-              <span className="truncate">{title}</span>
-              <span className="shrink-0">· p. {draftRect?.page}</span>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="marks-input">Marks {maxMarks ? `(out of ${maxMarks})` : ""}</Label>
-              <Input
-                id="marks-input"
-                type="number"
-                min={0}
-                max={maxMarks}
-                placeholder="e.g. 4"
-                value={marksInput}
-                onChange={(e) => setMarksInput(e.target.value)}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="feedback-input">Feedback</Label>
-              <Textarea
-                id="feedback-input"
-                placeholder="What's right or wrong about this part of the answer?"
-                className="resize-none"
-                rows={3}
-                value={feedbackInput}
-                onChange={(e) => setFeedbackInput(e.target.value)}
-                autoFocus
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={cancelHighlightDialog}>Cancel</Button>
-            <Button onClick={saveHighlight}>
-              {editingHighlightId ? "Save changes" : "Save highlight"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            <DialogFooter>
+              <Button variant="outline" onClick={cancelHighlightDialog} disabled={savingHighlight}>Cancel</Button>
+              <Button onClick={saveHighlight} disabled={savingHighlight}>
+                {savingHighlight ? "Saving..." : editingHighlightId ? "Save changes" : "Save highlight"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }

@@ -3,7 +3,7 @@ import { authFetch } from "../lib/auth-context"; // adjust path to your actual a
 import { Navbar } from "@/components/navbar";
 import { Card, CardContent } from "@/components/ui/card";
 import { useLocation } from "wouter";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   Search,
   X,
@@ -11,9 +11,12 @@ import {
   FileText,
   LayoutGrid,
   List as ListIcon,
-  HelpCircle,
-  Send,
+  ClipboardList,
+  Timer,
+  CalendarDays,
+  ArrowRight,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 // ---------------------------------------------------------------------------
 // Types — align these with your actual Mongoose/API shapes.
@@ -48,6 +51,23 @@ interface Resource {
     user_name: string;
     profile_pic?: string;
   };
+}
+
+// Matches the real Question model — every doc here was created by a teacher,
+// since POST /questions is role-gated server-side (requireRole "teacher").
+// There is no student-authored "question" in this schema, so Discover no
+// longer needs a client-side filter to exclude non-teacher content — using
+// this endpoint at all already guarantees that.
+interface TeacherQuestion {
+  _id: string;
+  title: string;
+  instructions?: string;
+  course: { _id: string; name: string } | string;
+  dueDate: string; // last moment a student may start an attempt
+  durationMinutes: number;
+  totalMarks: number;
+  questionPdfUrl: string;
+  questionFileName: string;
 }
 
 type SortKey = "newest" | "oldest" | "title" | "size";
@@ -86,16 +106,12 @@ function initials(name: string) {
     .toUpperCase();
 }
 
-function formatRelativeTime(iso: string) {
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return "Just now";
-  if (diffMin < 60) return `${diffMin}m ago`;
-  const diffHr = Math.floor(diffMin / 60);
-  if (diffHr < 24) return `${diffHr}h ago`;
-  const diffDay = Math.floor(diffHr / 24);
-  if (diffDay < 7) return `${diffDay}d ago`;
-  return formatDate(iso);
+function courseName(course: TeacherQuestion["course"]) {
+  return typeof course === "string" ? course : course.name;
+}
+
+function isPastDue(date: string) {
+  return new Date(date).getTime() < Date.now();
 }
 
 // Small debounce hook so search doesn't refilter on every keystroke.
@@ -108,100 +124,13 @@ function useDebouncedValue<T>(value: T, delayMs: number) {
   return debounced;
 }
 
-// ---------------------------------------------------------------------------
-// Questions — static/local for now. Teachers post these from the Dashboard;
-// here students can read them and submit an answer. Answers are kept in
-// local component state only (not persisted to a backend yet).
-// ---------------------------------------------------------------------------
-
-interface QuestionAnswer {
-  id: string;
-  studentName: string;
-  answer: string;
-  createdAt: string;
-}
-
-interface QuestionItem {
-  id: string;
-  question: string;
-  course: string;
-  teacher: string;
-  createdAt: string;
-  answers: QuestionAnswer[];
-}
-
-function minutesAgo(mins: number): string {
-  return new Date(Date.now() - mins * 60_000).toISOString();
-}
-
-const STATIC_QUESTIONS: QuestionItem[] = [
-  {
-    id: "q-1",
-    question: "What is the time complexity of merge sort in the worst case, and why?",
-    course: "Advanced Algorithms",
-    teacher: "Prof. Elena Marsh",
-    createdAt: minutesAgo(180),
-    answers: [
-      {
-        id: "a-1",
-        studentName: "Amara Chen",
-        answer: "O(n log n) — the array is always split in half, and merging two halves takes linear time at each of the log n levels.",
-        createdAt: minutesAgo(90),
-      },
-    ],
-  },
-  {
-    id: "q-2",
-    question: "Explain the difference between a stack and a queue, with a real-world example of each.",
-    course: "Data Structures 101",
-    teacher: "Prof. Daniel Okoro",
-    createdAt: minutesAgo(1200),
-    answers: [],
-  },
-  {
-    id: "q-3",
-    question: "Why does normalizing a database reduce redundancy?",
-    course: "Database Systems",
-    teacher: "Prof. Elena Marsh",
-    createdAt: minutesAgo(1800),
-    answers: [
-      {
-        id: "a-2",
-        studentName: "Priya Nair",
-        answer: "Each fact is stored in exactly one place, so an update only needs to touch a single row instead of many duplicates.",
-        createdAt: minutesAgo(1400),
-      },
-      {
-        id: "a-3",
-        studentName: "Diego Ruiz",
-        answer: "It splits data into related tables so the same information isn't repeated across rows.",
-        createdAt: minutesAgo(1100),
-      },
-    ],
-  },
-  {
-    id: "q-4",
-    question: "What happens when a recursive function is written without a base case?",
-    course: "Advanced Algorithms",
-    teacher: "Prof. Elena Marsh",
-    createdAt: minutesAgo(20),
-    answers: [],
-  },
-  {
-    id: "q-5",
-    question: "How does a hash map achieve close to O(1) average lookup time?",
-    course: "Data Structures 101",
-    teacher: "Prof. Daniel Okoro",
-    createdAt: minutesAgo(15),
-    answers: [],
-  },
-];
-
 export default function DiscoverPage() {
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [resources, setResources] = useState<Resource[]>([]);
+  const [teacherQuestions, setTeacherQuestions] = useState<TeacherQuestion[]>([]);
   const [loadingTeachers, setLoadingTeachers] = useState(true);
   const [loadingResources, setLoadingResources] = useState(true);
+  const [loadingQuestions, setLoadingQuestions] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [rawQuery, setRawQuery] = useState("");
@@ -212,15 +141,9 @@ export default function DiscoverPage() {
   const [view, setView] = useState<ViewMode>("grid");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
-  // Questions state
-  const [questions, setQuestions] = useState<QuestionItem[]>(STATIC_QUESTIONS);
-  const [questionFilter, setQuestionFilter] = useState<"all" | "unanswered">("all");
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [justSubmitted, setJustSubmitted] = useState<Record<string, boolean>>({});
-
   const searchRef = useRef<HTMLInputElement>(null);
   const [, navigate] = useLocation();
+
   useEffect(() => {
     let cancelled = false;
 
@@ -251,8 +174,29 @@ export default function DiscoverPage() {
       }
     }
 
+    async function loadQuestions() {
+      try {
+        // Same endpoint Assessments.tsx uses. As a student, listQuestions
+        // already filters to { published: true } and to courses the
+        // student is enrolled in — teacher-authorship is guaranteed by
+        // the schema itself, not something Discover needs to re-check.
+        const res = await authFetch("/questions");
+        if (!res.ok) throw new Error("Could not load questions");
+        const data = await res.json();
+        // Defensive filter only: drop anything missing a question paper,
+        // in case older docs predate the questionPdfUrl requirement.
+        const withPapers = (data.data ?? []).filter((q: TeacherQuestion) => Boolean(q.questionPdfUrl));
+        if (!cancelled) setTeacherQuestions(withPapers);
+      } catch {
+        if (!cancelled) setError((prev) => prev ?? "Questions could not be loaded");
+      } finally {
+        if (!cancelled) setLoadingQuestions(false);
+      }
+    }
+
     loadTeachers();
     loadResources();
+    loadQuestions();
     return () => {
       cancelled = true;
     };
@@ -302,6 +246,15 @@ export default function DiscoverPage() {
   const visibleResources = filteredResources.slice(0, visibleCount);
   const hasMore = visibleCount < filteredResources.length;
 
+  const filteredQuestions = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return teacherQuestions.filter((item) => {
+      if (activeCourse && typeof item.course !== "string" && item.course._id !== activeCourse) return false;
+      if (!q) return true;
+      return item.title.toLowerCase().includes(q) || courseName(item.course).toLowerCase().includes(q);
+    });
+  }, [teacherQuestions, query, activeCourse]);
+
   const activeTeacherName = teachers.find((t) => t._id === activeTeacher)?.user_name;
   const activeCourseName = courses.find((c) => c.id === activeCourse)?.name;
   const hasActiveFilters = Boolean(activeTeacher || activeCourse || rawQuery);
@@ -319,47 +272,12 @@ export default function DiscoverPage() {
     }
   }
 
-  const visibleQuestions = useMemo(() => {
-    if (questionFilter === "unanswered") {
-      return questions.filter((q) => q.answers.length === 0);
-    }
-    return questions;
-  }, [questions, questionFilter]);
-
-  const unansweredCount = useMemo(
-    () => questions.filter((q) => q.answers.length === 0).length,
-    [questions]
-  );
-
-  function handleSubmitAnswer(questionId: string) {
-    const draft = drafts[questionId]?.trim();
-    if (!draft) return;
-
-    setQuestions((prev) =>
-      prev.map((q) =>
-        q.id === questionId
-          ? {
-              ...q,
-              answers: [
-                ...q.answers,
-                {
-                  id: `a-${Date.now()}`,
-                  studentName: "You",
-                  answer: draft,
-                  createdAt: new Date().toISOString(),
-                },
-              ],
-            }
-          : q
-      )
-    );
-
-    setDrafts((prev) => ({ ...prev, [questionId]: "" }));
-    setExpanded((prev) => ({ ...prev, [questionId]: true }));
-    setJustSubmitted((prev) => ({ ...prev, [questionId]: true }));
-    setTimeout(() => {
-      setJustSubmitted((prev) => ({ ...prev, [questionId]: false }));
-    }, 2500);
+  // The actual start/timer/upload flow lives on Assessments.tsx — Discover
+  // stays a browse surface and hands off there rather than duplicating that
+  // logic. If you later split it into its own /questions/:id route, this is
+  // the one place that needs to change.
+  function goToExamination() {
+    navigate("/questions");
   }
 
   return (
@@ -382,8 +300,8 @@ export default function DiscoverPage() {
               Find a teacher, find their work
             </h1>
             <p className="mt-3 text-lg text-muted-foreground">
-              Browse instructors publishing on EduThread, answer the questions
-              they've posted, and annotate anything you open.
+              Browse instructors publishing on EduThread, the examinations
+              they've posted, and the documents they've shared.
             </p>
 
             <div className="mt-8 flex items-center gap-3 rounded-md border bg-background px-4 py-3 shadow-sm focus-within:ring-2 focus-within:ring-ring">
@@ -460,7 +378,7 @@ export default function DiscoverPage() {
               <h2 className="text-xl font-semibold">Teachers</h2>
               {activeTeacher && (
                 <button
-                  onClick={() =>navigate('/profile')}
+                  onClick={() => navigate("/profile")}
                   className="text-xs font-medium text-muted-foreground hover:text-foreground"
                 >
                   Show all
@@ -483,8 +401,7 @@ export default function DiscoverPage() {
                     <button
                       key={t._id}
                       onClick={() => navigate(`/profile/${t._id}`)}
-                      className={`flex w-52 shrink-0 items-center gap-3 rounded-xl border bg-background p-4 text-left shadow-sm transition-all hover:shadow-md 
-                      }`}
+                      className="flex w-52 shrink-0 items-center gap-3 rounded-xl border bg-background p-4 text-left shadow-sm transition-all hover:shadow-md"
                     >
                       {t.profile_pic ? (
                         <img
@@ -516,138 +433,60 @@ export default function DiscoverPage() {
           </div>
         </section>
 
-        {/* Questions section — teachers post, students answer */}
+        {/* Questions — sourced from /questions, so every card here is a
+            teacher-authored, PDF-backed examination. No client-side role
+            filtering needed; the endpoint only ever returns those. */}
         <section className="border-b py-12">
           <div className="container mx-auto px-4">
-            <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+            <div className="mb-6 flex items-baseline justify-between">
               <div>
                 <h2 className="flex items-center gap-2 text-xl font-semibold">
-                  <HelpCircle className="h-5 w-5 text-primary" />
-                  Questions from your teachers
+                  <ClipboardList className="h-5 w-5 text-primary" />
+                  Examinations from your teachers
                 </h2>
                 <p className="text-sm text-muted-foreground">
-                  {unansweredCount} unanswered question{unansweredCount === 1 ? "" : "s"} right now
+                  {filteredQuestions.length} question paper{filteredQuestions.length === 1 ? "" : "s"} available
                 </p>
               </div>
-
-              <div className="flex overflow-hidden rounded-md border shadow-sm">
-                <button
-                  onClick={() => setQuestionFilter("all")}
-                  aria-pressed={questionFilter === "all"}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                    questionFilter === "all"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-background text-muted-foreground hover:bg-accent"
-                  }`}
-                >
-                  All
-                </button>
-                <button
-                  onClick={() => setQuestionFilter("unanswered")}
-                  aria-pressed={questionFilter === "unanswered"}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                    questionFilter === "unanswered"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-background text-muted-foreground hover:bg-accent"
-                  }`}
-                >
-                  Unanswered
-                </button>
-              </div>
             </div>
+{loadingQuestions ? (
+  <div className="grid grid-cols-1 gap-4">
+    <div className="h-40 animate-pulse rounded-xl border bg-muted" />
+  </div>
+) : (
+  <Card className="border-muted shadow-sm">
+    <CardContent className="flex flex-col items-center gap-4 p-8 text-center">
+      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-primary/10">
+        <ClipboardList className="h-8 w-8 text-primary" />
+      </div>
 
-            {visibleQuestions.length === 0 ? (
-              <Card className="border-dashed">
-                <CardContent className="flex flex-col items-center py-12 text-center">
-                  <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-                    <HelpCircle className="h-6 w-6 text-muted-foreground" />
-                  </div>
-                  <p className="font-semibold">Nothing to answer right now</p>
-                  <p className="mt-1 text-sm text-muted-foreground">Check back once a teacher posts a new question.</p>
-                </CardContent>
-              </Card>
-            ) : (
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                {visibleQuestions.map((q) => {
-                  const isExpanded = expanded[q.id] ?? q.answers.length === 0;
-                  const draft = drafts[q.id] ?? "";
-                  return (
-                    <Card key={q.id} className="border-muted shadow-sm">
-                      <CardContent className="flex flex-col gap-3 p-5">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="inline-flex items-center rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium text-secondary-foreground">
-                            {q.course}
-                          </span>
-                          <span className="text-xs text-muted-foreground">{formatRelativeTime(q.createdAt)}</span>
-                        </div>
+      <div>
+        <h3 className="text-lg font-semibold">Online Examinations</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          View all available examinations, start your exams, upload answer
+          sheets, and track your submissions.
+        </p>
+      </div>
 
-                        <p className="text-sm font-semibold leading-snug">{q.question}</p>
-                        <p className="text-xs text-muted-foreground">Posted by {q.teacher}</p>
+      <Button
+        size="lg"
+        onClick={goToExamination}
+        className="mt-2"
+      >
+        <ClipboardList className="mr-2 h-4 w-4" />
+        Go to Examinations
+        <ArrowRight className="ml-2 h-4 w-4" />
+      </Button>
 
-                        {q.answers.length > 0 && (
-                          <button
-                            onClick={() => setExpanded((prev) => ({ ...prev, [q.id]: !isExpanded }))}
-                            className="self-start text-xs font-medium text-primary hover:underline"
-                          >
-                            {isExpanded ? "Hide" : "Show"} {q.answers.length} answer{q.answers.length === 1 ? "" : "s"}
-                          </button>
-                        )}
-
-                        {isExpanded && q.answers.length > 0 && (
-                          <div className="flex flex-col gap-2 rounded-md bg-muted/40 p-3">
-                            {q.answers.map((a) => (
-                              <div key={a.id} className="flex items-start gap-2">
-                                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary">
-                                  {initials(a.studentName)}
-                                </span>
-                                <div className="min-w-0">
-                                  <p className="text-xs">
-                                    <span className="font-medium">{a.studentName}</span>{" "}
-                                    <span className="text-muted-foreground">· {formatRelativeTime(a.createdAt)}</span>
-                                  </p>
-                                  <p className="text-sm text-muted-foreground">{a.answer}</p>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        <div className="mt-1 flex flex-col gap-2">
-                          <textarea
-                            value={draft}
-                            onChange={(e) => setDrafts((prev) => ({ ...prev, [q.id]: e.target.value }))}
-                            placeholder="Write your answer…"
-                            rows={2}
-                            className="w-full resize-none rounded-md border bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                          />
-                          <div className="flex items-center justify-between">
-                            <AnimatePresence>
-                              {justSubmitted[q.id] && (
-                                <motion.span
-                                  initial={{ opacity: 0 }}
-                                  animate={{ opacity: 1 }}
-                                  exit={{ opacity: 0 }}
-                                  className="flex items-center gap-1 text-xs font-medium text-emerald-600"
-                                >
-                                  <CheckCircle2 className="h-3.5 w-3.5" /> Answer submitted
-                                </motion.span>
-                              )}
-                            </AnimatePresence>
-                            <button
-                              onClick={() => handleSubmitAnswer(q.id)}
-                              disabled={!draft.trim()}
-                              className="ml-auto inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                              <Send className="h-3.5 w-3.5" /> Submit answer
-                            </button>
-                          </div>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  );
-                })}
-              </div>
-            )}
+      {!loadingQuestions && (
+        <p className="text-xs text-muted-foreground">
+          {filteredQuestions.length} examination
+          {filteredQuestions.length !== 1 ? "s" : ""} available
+        </p>
+      )}
+    </CardContent>
+  </Card>
+)}
           </div>
         </section>
 

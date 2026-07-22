@@ -25,6 +25,7 @@ import {
 import { authFetch } from "@/lib/auth-context";
 import { motion, AnimatePresence } from "framer-motion";
 import { NavBar } from "@/components/Dashboard-viewer-navbar";
+import { navigate } from "wouter/use-browser-location";
 
 // ---------------------------------------------------------------------------
 // Resource types — same shape as GET /api/courses/resources/all in Viewer.tsx
@@ -584,7 +585,7 @@ export default function Dashboard() {
             <Button variant="outline" onClick={() => setUploadOpen(true)} data-testid="button-upload-resource">
               <Upload className="h-4 w-4 mr-2" /> Upload Resource
             </Button>
-            <Button variant="outline" onClick={() => setPostQuestionOpen(true)} data-testid="button-post-question">
+            <Button variant="outline" onClick={() => navigate('/questions')} data-testid="button-post-question">
               <HelpCircle className="h-4 w-4 mr-2" /> Post Question
             </Button>
             <Button onClick={() => setCreateCourseOpen(true)} data-testid="button-create-course">
